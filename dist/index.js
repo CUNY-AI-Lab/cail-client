@@ -49,8 +49,14 @@ export class CailError extends Error {
 }
 const APP_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const RESERVED_METADATA_KEYS = new Set(["user_id", "app", "via"]);
+const POLLUTION_METADATA_KEYS = new Set([
+    "__proto__",
+    "constructor",
+    "prototype",
+]);
 const MAX_METADATA_KEYS = 8;
 const MAX_METADATA_STRING_LEN = 128;
+const CREDENTIAL_CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/;
 /**
  * Validate + serialize `X-CAIL-Metadata` (I3). Throws a `CailError` (code
  * `"invalid_metadata"`, status 0 — a client-side validation error, never on the
@@ -65,6 +71,9 @@ function serializeMetadata(meta) {
     for (const key of keys) {
         if (RESERVED_METADATA_KEYS.has(key)) {
             throw new CailError("invalid_metadata", `X-CAIL-Metadata key "${key}" is reserved and cannot be set by the client.`, 0);
+        }
+        if (POLLUTION_METADATA_KEYS.has(key)) {
+            throw new CailError("invalid_metadata", `X-CAIL-Metadata key "${key}" is not allowed.`, 0);
         }
         const value = meta[key];
         const t = typeof value;
@@ -155,8 +164,50 @@ function backoffDelayMs(attempt) {
     // attempt is 0-based for the first retry. Exponential base 200ms, capped.
     return Math.min(200 * 2 ** attempt, 2000);
 }
-function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+function abortReason(signal) {
+    if (signal.reason !== undefined)
+        return signal.reason;
+    if (typeof DOMException !== "undefined") {
+        return new DOMException("The operation was aborted.", "AbortError");
+    }
+    const err = new Error("The operation was aborted.");
+    err.name = "AbortError";
+    return err;
+}
+function sleep(ms, signal) {
+    if (!signal)
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    if (signal.aborted)
+        return Promise.reject(abortReason(signal));
+    return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            signal.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
+        const onAbort = () => {
+            clearTimeout(timeout);
+            signal.removeEventListener("abort", onAbort);
+            reject(abortReason(signal));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+    });
+}
+function retryDelayMs(response, attempt) {
+    const backoff = backoffDelayMs(attempt);
+    const retryAfter = response.headers.get("Retry-After");
+    if (retryAfter === null || !/^\d+$/.test(retryAfter))
+        return backoff;
+    const seconds = Number(retryAfter);
+    return Math.min(Math.max(backoff, seconds * 1000), 10_000);
+}
+function isReadableStreamBody(body) {
+    return (typeof ReadableStream !== "undefined" && body instanceof ReadableStream);
+}
+function addRetryAfterExtra(response, extras) {
+    const retryAfter = response.headers.get("Retry-After");
+    if (retryAfter !== null && !("retry_after" in extras)) {
+        extras["retry_after"] = retryAfter;
+    }
 }
 /**
  * Parse a non-2xx `Response` into a `CailError` (I4). The envelope
@@ -186,26 +237,24 @@ export async function parseCailError(response) {
     if (typeof parsed === "object" &&
         parsed !== null &&
         !Array.isArray(parsed) &&
-        typeof parsed["error"] === "string") {
+        typeof parsed["error"] === "string" &&
+        typeof parsed["message"] === "string") {
         const obj = parsed;
         const code = obj["error"];
-        const message = typeof obj["message"] === "string"
-            ? obj["message"]
-            : `Request failed with status ${status}.`;
+        const message = obj["message"];
         const extras = {};
         for (const key of Object.keys(obj)) {
             if (key !== "error" && key !== "message")
                 extras[key] = obj[key];
         }
         // Preserve the Retry-After header alongside the envelope (INTEGRATION.md §2).
-        const retryAfter = response.headers.get("Retry-After");
-        if (retryAfter !== null && !("retry_after" in extras)) {
-            extras["retry_after"] = retryAfter;
-        }
+        addRetryAfterExtra(response, extras);
         return new CailError(code, message, status, extras);
     }
     // Non-JSON / shape-invalid body: NOT swallowed, NOT thrown away (I4).
-    return new CailError("unknown_error", `The CAIL backbone returned an unexpected response (status ${status}).`, status, {});
+    const extras = {};
+    addRetryAfterExtra(response, extras);
+    return new CailError("unknown_error", `The CAIL backbone returned an unexpected response (status ${status}).`, status, extras);
 }
 /** Is this a browser-like environment (used to pick the default 401 hook)? */
 function inBrowser() {
@@ -243,6 +292,10 @@ export function createCailClient(opts) {
             typeof credential.token !== "string") {
             throw new CailError("invalid_credential", 'call() requires a credential { kind: "jwt" | "key", token: string }.', 0);
         }
+        if (credential.token.length === 0 ||
+            CREDENTIAL_CONTROL_CHAR_RE.test(credential.token)) {
+            throw new CailError("invalid_credential", "Credential token must be non-empty and contain no control characters.", 0);
+        }
         const headers = toHeaderRecord(init.headers);
         // I1 — exactly one credential on the wire.
         if (credential.kind === "jwt") {
@@ -267,7 +320,7 @@ export function createCailClient(opts) {
         const headerMeta = existingMetadataHeader(headers);
         let merged;
         if (headerMeta !== undefined || options?.metadata !== undefined) {
-            merged = {};
+            merged = Object.create(null);
             if (headerMeta !== undefined) {
                 let base;
                 try {
@@ -293,6 +346,8 @@ export function createCailClient(opts) {
         }
         const url = `${baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
         // I8 — body + model forwarded verbatim: we never touch init.body.
+        const signal = init.signal;
+        const hasNonReplayableBody = isReadableStreamBody(init.body);
         const requestInit = { ...init, headers };
         let attempt = 0;
         // Total tries = 1 + maxRetries.
@@ -302,9 +357,13 @@ export function createCailClient(opts) {
                 response = await fetchImpl(url, requestInit);
             }
             catch (err) {
+                if (signal?.aborted)
+                    throw err;
                 // Network/transport error (I5): retry up to maxRetries, else throw.
-                if (isRetriableNetworkError(err) && attempt < maxRetries) {
-                    await sleep(backoffDelayMs(attempt));
+                if (!hasNonReplayableBody &&
+                    isRetriableNetworkError(err) &&
+                    attempt < maxRetries) {
+                    await sleep(backoffDelayMs(attempt), signal);
                     attempt++;
                     continue;
                 }
@@ -318,7 +377,7 @@ export function createCailClient(opts) {
             }
             // I5 — retry policy: NEVER 4xx; retry 5xx up to maxRetries.
             const is5xx = response.status >= 500 && response.status < 600;
-            if (is5xx && attempt < maxRetries) {
+            if (is5xx && !hasNonReplayableBody && attempt < maxRetries) {
                 // Drain the failed response body so the connection can be reused.
                 try {
                     await response.body?.cancel();
@@ -326,7 +385,7 @@ export function createCailClient(opts) {
                 catch {
                     /* ignore */
                 }
-                await sleep(backoffDelayMs(attempt));
+                await sleep(retryDelayMs(response, attempt), signal);
                 attempt++;
                 continue;
             }
@@ -336,7 +395,12 @@ export function createCailClient(opts) {
             if (error.status === 401 &&
                 error.code === "authentication_required" &&
                 onAuthRequired) {
-                onAuthRequired(error);
+                try {
+                    onAuthRequired(error);
+                }
+                catch {
+                    // The hook is advisory; it must never mask the backbone error.
+                }
             }
             throw error;
         }

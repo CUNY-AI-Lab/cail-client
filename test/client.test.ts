@@ -1,5 +1,5 @@
 /**
- * The 26 contract vectors (SPEC §5). Each asserts an invariant on the CAPTURED
+ * The contract vectors (SPEC §5). Each asserts an invariant on the CAPTURED
  * WIRE via the recording mock proxy (test/mock.ts) — never on client internals.
  */
 import { describe, it, expect, vi } from "vitest";
@@ -36,6 +36,16 @@ function wired(
     ...opts,
   });
   return { rec, client };
+}
+
+function readableBody(text = "hello-stream"): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(text));
+      controller.close();
+    },
+  });
 }
 
 // ── Credential forwarding (I1) ────────────────────────────────────────────
@@ -94,6 +104,22 @@ describe("I1 — exactly one credential on the wire", () => {
       expect(both).toBe(false);
       expect(rec.one.headers["x-cail-identity-jwt"]).toBeUndefined();
     }
+  });
+
+  it("V29 token with control characters throws before fetch and does not echo token", async () => {
+    const rec = recordingFetch(jsonOk({}));
+    const client = createCailClient({
+      baseUrl: BASE,
+      app: APP,
+      fetchImpl: rec.fn,
+    });
+    const err = await client
+      .call("/v1", {}, { kind: "key", token: "sk\r\nX-Evil: 1" })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(CailError);
+    expect(err.code).toBe("invalid_credential");
+    expect(err.message).not.toContain("sk\r\nX-Evil");
+    expect(rec.captured).toHaveLength(0);
   });
 });
 
@@ -173,6 +199,36 @@ describe("I3 — X-CAIL-Metadata validation", () => {
         client.call("/v1", {}, JWT, { metadata: { [reserved]: "x" } }),
       ).rejects.toBeInstanceOf(CailError);
     }
+  });
+
+  it("V30 existing metadata __proto__ object value → throws, not silently dropped", async () => {
+    const { rec, client } = wired(jsonOk({}));
+    const err = await client
+      .call(
+        "/v1",
+        {
+          headers: {
+            "X-CAIL-Metadata":
+              '{"__proto__":{"nested":1},"project":"x"}',
+          },
+        },
+        JWT,
+      )
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(CailError);
+    expect(err.code).toBe("invalid_metadata");
+    expect(rec.captured).toHaveLength(0);
+  });
+
+  it("V30b options.metadata constructor key → throws", async () => {
+    const { rec, client } = wired(jsonOk({}));
+    const metadata = { ["constructor"]: "x" };
+    const err = await client
+      .call("/v1", {}, JWT, { metadata })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(CailError);
+    expect(err.code).toBe("invalid_metadata");
+    expect(rec.captured).toHaveLength(0);
   });
 });
 
@@ -264,6 +320,17 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
     expect(err).not.toBeInstanceOf(Response);
   });
 
+  it("V33b non-JSON 503 preserves Retry-After on unknown_error", async () => {
+    const { client } = wired(nonJson(503, "busy", { "Retry-After": "7" }), {
+      maxRetries: 0,
+    });
+    const err = await client.call("/v1", {}, KEY).catch((e) => e);
+    expect(err).toBeInstanceOf(CailError);
+    expect(err.code).toBe("unknown_error");
+    expect(err.status).toBe(503);
+    expect(err.extras["retry_after"]).toBe("7");
+  });
+
   it("V19 message is byte-identical to the envelope's message (no rewording)", async () => {
     const exact = "Précisely thîs — verbatim, incl. 中文 & symbols: <>&\"'.";
     const { client } = wired(envelope(400, { error: "bad_request", message: exact }));
@@ -319,6 +386,88 @@ describe("I5 — retry policy", () => {
     expect(err).toBeInstanceOf(CailError);
     expect(rec.captured).toHaveLength(3); // 1 + 2 retries
   });
+
+  it("V27 abort mid-flight rejects with original AbortError and does not retry", async () => {
+    const { rec, client } = wired({ abortableHang: true });
+    const ac = new AbortController();
+    const abortErr = new DOMException("stop", "AbortError");
+    const started = Date.now();
+    const pending = client
+      .call("/v1", { signal: ac.signal }, KEY)
+      .catch((e) => e);
+
+    setTimeout(() => ac.abort(abortErr), 10);
+    const err = await pending;
+
+    expect(Date.now() - started).toBeLessThan(100);
+    expect(err).toBe(abortErr);
+    expect(err.name).toBe("AbortError");
+    expect(err).not.toBeInstanceOf(CailError);
+    expect(rec.captured).toHaveLength(1);
+  });
+
+  it("V27b abort during 5xx backoff rejects promptly and does not issue retry", async () => {
+    const { rec, client } = wired([
+      envelope(500, { error: "server_error", message: "try later" }),
+      jsonOk({ ok: true }),
+    ]);
+    const ac = new AbortController();
+    const abortErr = new DOMException("stop", "AbortError");
+    const started = Date.now();
+    const pending = client
+      .call("/v1", { signal: ac.signal }, KEY)
+      .catch((e) => e);
+
+    setTimeout(() => ac.abort(abortErr), 10);
+    const err = await pending;
+
+    expect(Date.now() - started).toBeLessThan(100);
+    expect(err).toBe(abortErr);
+    expect(err.name).toBe("AbortError");
+    expect(err).not.toBeInstanceOf(CailError);
+    expect(rec.captured).toHaveLength(1);
+  });
+
+  it("V28 ReadableStream body + 500 envelope → no retry, preserves envelope", async () => {
+    const { rec, client } = wired([
+      envelope(500, { error: "server_error", message: "stream failed" }),
+      jsonOk({ ok: true }),
+    ]);
+    const err = await client
+      .call("/v1", { method: "POST", body: readableBody() }, KEY)
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(CailError);
+    expect(err.code).toBe("server_error");
+    expect(err.message).toBe("stream failed");
+    expect(rec.captured).toHaveLength(1);
+  });
+
+  it("V28b ReadableStream body + network error → no retry, network_error", async () => {
+    const { rec, client } = wired([{ networkError: true }, jsonOk({ ok: true })]);
+    const err = await client
+      .call("/v1", { method: "POST", body: readableBody() }, KEY)
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(CailError);
+    expect(err.code).toBe("network_error");
+    expect(rec.captured).toHaveLength(1);
+  });
+
+  it("V33 503 Retry-After seconds is honored before retry", async () => {
+    const { rec, client } = wired([
+      envelope(
+        503,
+        { error: "server_busy", message: "try later" },
+        { "Retry-After": "1" },
+      ),
+      jsonOk({ ok: true }),
+    ]);
+    const started = Date.now();
+    const resp = await client.call("/v1", {}, KEY);
+    const elapsed = Date.now() - started;
+    expect(resp.status).toBe(200);
+    expect(rec.captured).toHaveLength(2);
+    expect(elapsed).toBeGreaterThanOrEqual(900);
+  });
 });
 
 // ── 401 hook + passthrough + verbatim body (I6/I7/I8) ─────────────────────
@@ -372,6 +521,42 @@ describe("I6 — 401 hook", () => {
     } finally {
       (globalThis as { location?: unknown }).location = orig;
     }
+  });
+
+  it("V31 throwing onAuthRequired hook does not mask the CailError", async () => {
+    const { client } = wired(
+      envelope(401, {
+        error: "authentication_required",
+        message: "sign in",
+        login_url: "/login",
+      }),
+      {
+        onAuthRequired: () => {
+          throw new Error("hook exploded");
+        },
+      },
+    );
+    const err = await client.call("/v1", {}, JWT).catch((e) => e);
+    expect(err).toBeInstanceOf(CailError);
+    expect(err.code).toBe("authentication_required");
+    expect(err.message).toBe("sign in");
+  });
+
+  it("V32 malformed authentication_required envelope → unknown_error, no hook", async () => {
+    const spy = vi.fn();
+    const { client } = wired(
+      envelope(401, {
+        error: "authentication_required",
+        message: 123,
+        login_url: "/login",
+      }),
+      { onAuthRequired: spy },
+    );
+    const err = await client.call("/v1", {}, JWT).catch((e) => e);
+    expect(err).toBeInstanceOf(CailError);
+    expect(err.code).toBe("unknown_error");
+    expect(err.status).toBe(401);
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 
