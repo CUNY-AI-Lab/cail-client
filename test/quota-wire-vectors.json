@@ -1,0 +1,168 @@
+{
+  "version": "1",
+  "contract": "cail-gateway docs/QUOTA_SURFACE.md v3 (2026-07-08)",
+  "sync": "CANONICAL COPY lives in cail-gateway model-proxy/test/quota-wire-vectors.json; cail-client vendors a byte-identical copy at test/quota-wire-vectors.json. Both repos' tests pin this file's SHA-256 — change it in BOTH repos in one deliberate step or tests fail.",
+  "header_cases": [
+    {
+      "name": "complete-ok",
+      "producer_emits": true,
+      "headers": {
+        "X-CAIL-Quota-Limit": "10000000",
+        "X-CAIL-Quota-Used": "630000",
+        "X-CAIL-Quota-Remaining": "9370000",
+        "X-CAIL-Quota-Reset": "1723200000",
+        "X-CAIL-Quota-Window": "2592000",
+        "X-CAIL-Quota-State": "ok"
+      },
+      "expect": {
+        "limit": 10000000,
+        "used": 630000,
+        "remaining": 9370000,
+        "reset": 1723200000,
+        "window_seconds": 2592000,
+        "state": "ok"
+      }
+    },
+    {
+      "name": "complete-stale",
+      "producer_emits": true,
+      "headers": {
+        "X-CAIL-Quota-Limit": "10000000",
+        "X-CAIL-Quota-Used": "10250000",
+        "X-CAIL-Quota-Remaining": "0",
+        "X-CAIL-Quota-Reset": "1724000000",
+        "X-CAIL-Quota-Window": "2592000",
+        "X-CAIL-Quota-State": "stale"
+      },
+      "expect": {
+        "limit": 10000000,
+        "used": 10250000,
+        "remaining": 0,
+        "reset": 1724000000,
+        "window_seconds": 2592000,
+        "state": "stale"
+      }
+    },
+    {
+      "name": "zero-used-fresh-subject",
+      "producer_emits": true,
+      "headers": {
+        "X-CAIL-Quota-Limit": "10000000",
+        "X-CAIL-Quota-Used": "0",
+        "X-CAIL-Quota-Remaining": "10000000",
+        "X-CAIL-Quota-Reset": "1720600000",
+        "X-CAIL-Quota-Window": "2592000",
+        "X-CAIL-Quota-State": "ok"
+      },
+      "expect": {
+        "limit": 10000000,
+        "used": 0,
+        "remaining": 10000000,
+        "reset": 1720600000,
+        "window_seconds": 2592000,
+        "state": "ok"
+      }
+    },
+    {
+      "name": "missing-one-header-all-or-none",
+      "producer_emits": false,
+      "headers": {
+        "X-CAIL-Quota-Limit": "10000000",
+        "X-CAIL-Quota-Used": "630000",
+        "X-CAIL-Quota-Remaining": "9370000",
+        "X-CAIL-Quota-Reset": "1723200000",
+        "X-CAIL-Quota-Window": "2592000"
+      },
+      "expect": null
+    },
+    {
+      "name": "malformed-integer",
+      "producer_emits": false,
+      "headers": {
+        "X-CAIL-Quota-Limit": "ten-dollars",
+        "X-CAIL-Quota-Used": "630000",
+        "X-CAIL-Quota-Remaining": "9370000",
+        "X-CAIL-Quota-Reset": "1723200000",
+        "X-CAIL-Quota-Window": "2592000",
+        "X-CAIL-Quota-State": "ok"
+      },
+      "expect": null
+    },
+    {
+      "name": "negative-integer-never-on-wire",
+      "producer_emits": false,
+      "headers": {
+        "X-CAIL-Quota-Limit": "10000000",
+        "X-CAIL-Quota-Used": "630000",
+        "X-CAIL-Quota-Remaining": "-42",
+        "X-CAIL-Quota-Reset": "1723200000",
+        "X-CAIL-Quota-Window": "2592000",
+        "X-CAIL-Quota-State": "ok"
+      },
+      "expect": null
+    },
+    {
+      "name": "unknown-state-value",
+      "producer_emits": false,
+      "headers": {
+        "X-CAIL-Quota-Limit": "10000000",
+        "X-CAIL-Quota-Used": "630000",
+        "X-CAIL-Quota-Remaining": "9370000",
+        "X-CAIL-Quota-Reset": "1723200000",
+        "X-CAIL-Quota-Window": "2592000",
+        "X-CAIL-Quota-State": "approximately"
+      },
+      "expect": null
+    },
+    {
+      "name": "no-quota-headers-at-all",
+      "producer_emits": false,
+      "headers": {},
+      "expect": null
+    }
+  ],
+  "quota_body_cases": [
+    {
+      "name": "complete-quota-body",
+      "body": {
+        "object": "quota",
+        "subject": "cail-EDGAR.TROUDT14",
+        "unit": "microdollar",
+        "currency": "USD",
+        "window_seconds": 2592000,
+        "limit": 10000000,
+        "used": 630000,
+        "remaining": 9370000,
+        "reset": 1723200000,
+        "as_of": 1720600000,
+        "state": "ok",
+        "enforced": true,
+        "limit_usd": "10.00",
+        "used_usd": "0.63",
+        "remaining_usd": "9.37"
+      },
+      "expect": {
+        "subject": "cail-EDGAR.TROUDT14",
+        "limit": 10000000,
+        "used": 630000,
+        "remaining": 9370000,
+        "reset": 1723200000,
+        "window_seconds": 2592000,
+        "state": "ok",
+        "enforced": true,
+        "as_of": 1720600000
+      }
+    }
+  ],
+  "error_cases": [
+    {
+      "name": "quota-unavailable-503",
+      "status": 503,
+      "body": {
+        "error": "quota_unavailable",
+        "message": "We could not read your quota right now. Model calls may still work; your budget still applies."
+      },
+      "expect_error_code": "quota_unavailable"
+    }
+  ]
+}

@@ -131,12 +131,34 @@ try {
 }
 ```
 
-## The contract — 8 invariants
+### Reading quota
+
+Model-call responses may carry advisory quota headers. Read them from any 2xx
+`Response` with `parseQuotaHeaders(response.headers)`; it returns `null` when
+the meter is unavailable.
+
+```ts
+import { parseQuotaHeaders } from "@cuny-ai-lab/cail-client";
+
+const res = await cail.call(path, init, credential);
+const quota = parseQuotaHeaders(res.headers);
+```
+
+For an explicit snapshot, call `GET /quota` through the client:
+
+```ts
+const quota = await cail.getQuota(credential);
+```
+
+The producer contract is `cail-gateway` `docs/QUOTA_SURFACE.md`.
+
+## The contract — 9 invariants
 
 `createCailClient({ baseUrl, app, onAuthRequired?, fetchImpl?, maxRetries? })`
-returns `{ call(path, init, credential, options?) }`. `call()` returns the 2xx
-`Response` **by reference** and **throws** a `CailError` on any backbone error.
-Loosening or removing any invariant is a **major** semver bump.
+returns `{ call(path, init, credential, options?), getQuota(credential) }`.
+`call()` returns the 2xx `Response` **by reference** and **throws** a
+`CailError` on any backbone error. Loosening or removing any invariant is a
+**major** semver bump.
 
 | # | Invariant | The client guarantees |
 |---|-----------|-----------------------|
@@ -148,14 +170,19 @@ Loosening or removing any invariant is a **major** semver bump.
 | **I6** | 401 hook | `401 authentication_required` → invokes `onAuthRequired(err)`, then **still throws** the original `CailError` even if the hook throws. Browser default: same-origin redirect to `err.extras.login_url` or `/login?rt=<path>`. |
 | **I7** | 2xx passthrough, streams intact | Success `Response` returned **by reference** — body not buffered, so SSE streams pass through. |
 | **I8** | Body + model untouched | `init.body` forwarded verbatim; the client does **not** rewrite the `model` id (the proxy adds the `workers-ai/` prefix on compat routes). |
+| **I9** | Quota headers are advisory | `parseQuotaHeaders(headers)` only returns a quota meter when all six `X-CAIL-Quota-*` headers are present and valid. Missing, malformed, negative, unsafe, or unknown-state members return `null` — **never** a partial meter and never an error. |
 
 ## API
 
 - `createCailClient(opts): CailClient` — validates the `app` slug at construction.
 - `CailClient.call(path, init, credential, options?): Promise<Response>` — 2xx by
   reference; throws `CailError` otherwise.
+- `CailClient.getQuota(credential): Promise<CailQuotaSnapshot>` — reads
+  `GET /quota`; throws `CailError` on non-2xx or malformed 2xx quota bodies.
 - `class CailError extends Error` — `{ code, message, status, extras }`.
 - `parseCailError(response): Promise<CailError>` — standalone envelope parser (I4).
+- `parseQuotaHeaders(headers): CailQuota | null` — standalone all-or-none
+  parser for advisory quota response headers (I9).
 - `browserAuthRedirect(err)` — the default browser 401 hook (same-origin-guarded).
 
 ## Development

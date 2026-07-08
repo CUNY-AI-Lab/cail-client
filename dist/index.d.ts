@@ -7,7 +7,7 @@
  * re-derives them.
  *
  * Design contract (see README + CAIL_CLIENT_PRIMITIVE_SPEC.md, invariants
- * I1–I8):
+ * I1–I9):
  *   - Pure Web-standard `fetch`/`Request`/`Response` — runs unchanged in the
  *     browser, Cloudflare Workers, and Node >=20. No SDK deps.
  *   - Exactly ONE credential reaches the wire (I1): the JWT path strips any
@@ -21,6 +21,8 @@
  *     (I6).
  *   - 2xx `Response` returned by reference, body NOT buffered (SSE passthrough,
  *     I7); `init.body` and the `model` id forwarded verbatim (I8).
+ *   - Quota headers are advisory and all-or-none: absent/malformed quota
+ *     headers mean "meter unavailable", never a client error (I9).
  *
  * The public surface is `string`/`number`/plain-object/`Response` only — no
  * ambient platform (`DOM`/Workers) types leak out of the `.d.ts`.
@@ -35,6 +37,21 @@ export type CailCredential = {
 };
 /** Per-call spend metadata (I3). Merged with any `X-CAIL-Metadata` in `init`. */
 export type CailMetadata = Record<string, string | number>;
+/** Advisory quota meter carried on model-proxy responses (I9). */
+export interface CailQuota {
+    limit: number;
+    used: number;
+    remaining: number;
+    reset: number;
+    window_seconds: number;
+    state: "ok" | "stale";
+}
+/** Snapshot returned by `GET /quota`. */
+export interface CailQuotaSnapshot extends CailQuota {
+    subject: string;
+    enforced: boolean;
+    as_of: number;
+}
 /**
  * A typed CAIL backbone error. Thrown by `call()` on any non-2xx response (I4)
  * and on retry exhaustion (I5). `message` is the envelope's `message` verbatim
@@ -80,7 +97,20 @@ export interface CailClient {
      * @param options  optional per-call metadata (I3).
      */
     call(path: string, init: RequestInit, credential: CailCredential, options?: CailCallOptions): Promise<Response>;
+    /**
+     * Read the authenticated subject's quota snapshot from `GET /quota`.
+     * Non-2xx responses throw the same {@link CailError} envelope as `call()`;
+     * malformed 2xx quota bodies throw `code:"unknown_error"`.
+     */
+    getQuota(credential: CailCredential): Promise<CailQuotaSnapshot>;
 }
+/**
+ * Parse advisory quota headers from any model-proxy response (I9). The six
+ * `X-CAIL-Quota-*` headers are all-or-none: if any member is absent,
+ * malformed, negative, unsafe, or has an unknown state, the meter is
+ * unavailable and this returns `null`. Header problems are NEVER errors.
+ */
+export declare function parseQuotaHeaders(headers: Headers): CailQuota | null;
 /**
  * Browser default `onAuthRequired` (I6): redirect to the proxy-supplied
  * `login_url` (SAME-ORIGIN ONLY — open-redirect guard) or, failing that, to
