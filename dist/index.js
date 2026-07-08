@@ -7,7 +7,7 @@
  * re-derives them.
  *
  * Design contract (see README + CAIL_CLIENT_PRIMITIVE_SPEC.md, invariants
- * I1–I8):
+ * I1–I9):
  *   - Pure Web-standard `fetch`/`Request`/`Response` — runs unchanged in the
  *     browser, Cloudflare Workers, and Node >=20. No SDK deps.
  *   - Exactly ONE credential reaches the wire (I1): the JWT path strips any
@@ -21,6 +21,8 @@
  *     (I6).
  *   - 2xx `Response` returned by reference, body NOT buffered (SSE passthrough,
  *     I7); `init.body` and the `model` id forwarded verbatim (I8).
+ *   - Quota headers are advisory and all-or-none: absent/malformed quota
+ *     headers mean "meter unavailable", never a client error (I9).
  *
  * The public surface is `string`/`number`/plain-object/`Response` only — no
  * ambient platform (`DOM`/Workers) types leak out of the `.d.ts`.
@@ -57,6 +59,49 @@ const POLLUTION_METADATA_KEYS = new Set([
 const MAX_METADATA_KEYS = 8;
 const MAX_METADATA_STRING_LEN = 128;
 const CREDENTIAL_CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/;
+const QUOTA_STATE_VALUES = new Set(["ok", "stale"]);
+const QUOTA_INTEGER_RE = /^\d+$/;
+function parseQuotaInteger(value) {
+    if (value === null || !QUOTA_INTEGER_RE.test(value))
+        return null;
+    const n = Number(value);
+    if (!Number.isSafeInteger(n) || n < 0)
+        return null;
+    return n;
+}
+function isQuotaState(value) {
+    return typeof value === "string" && QUOTA_STATE_VALUES.has(value);
+}
+/**
+ * Parse advisory quota headers from any model-proxy response (I9). The six
+ * `X-CAIL-Quota-*` headers are all-or-none: if any member is absent,
+ * malformed, negative, unsafe, or has an unknown state, the meter is
+ * unavailable and this returns `null`. Header problems are NEVER errors.
+ */
+export function parseQuotaHeaders(headers) {
+    const limit = parseQuotaInteger(headers.get("X-CAIL-Quota-Limit"));
+    const used = parseQuotaInteger(headers.get("X-CAIL-Quota-Used"));
+    const remaining = parseQuotaInteger(headers.get("X-CAIL-Quota-Remaining"));
+    const reset = parseQuotaInteger(headers.get("X-CAIL-Quota-Reset"));
+    const windowSeconds = parseQuotaInteger(headers.get("X-CAIL-Quota-Window"));
+    const state = headers.get("X-CAIL-Quota-State");
+    if (limit === null ||
+        used === null ||
+        remaining === null ||
+        reset === null ||
+        windowSeconds === null ||
+        !isQuotaState(state)) {
+        return null;
+    }
+    return {
+        limit,
+        used,
+        remaining,
+        reset,
+        window_seconds: windowSeconds,
+        state,
+    };
+}
 /**
  * Validate + serialize `X-CAIL-Metadata` (I3). Throws a `CailError` (code
  * `"invalid_metadata"`, status 0 — a client-side validation error, never on the
@@ -256,6 +301,54 @@ export async function parseCailError(response) {
     addRetryAfterExtra(response, extras);
     return new CailError("unknown_error", `The CAIL backbone returned an unexpected response (status ${status}).`, status, extras);
 }
+function quotaBodyUnknownError(status) {
+    return new CailError("unknown_error", `The CAIL backbone returned an unexpected quota response (status ${status}).`, status);
+}
+function quotaBodyInteger(obj, key) {
+    const value = obj[key];
+    if (typeof value !== "number" ||
+        !Number.isSafeInteger(value) ||
+        value < 0) {
+        return null;
+    }
+    return value;
+}
+function parseQuotaSnapshotBody(body, status) {
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+        throw quotaBodyUnknownError(status);
+    }
+    const obj = body;
+    const limit = quotaBodyInteger(obj, "limit");
+    const used = quotaBodyInteger(obj, "used");
+    const remaining = quotaBodyInteger(obj, "remaining");
+    const reset = quotaBodyInteger(obj, "reset");
+    const windowSeconds = quotaBodyInteger(obj, "window_seconds");
+    const asOf = quotaBodyInteger(obj, "as_of");
+    const state = obj["state"];
+    if (obj["object"] !== "quota" ||
+        typeof obj["subject"] !== "string" ||
+        typeof obj["enforced"] !== "boolean" ||
+        limit === null ||
+        used === null ||
+        remaining === null ||
+        reset === null ||
+        windowSeconds === null ||
+        asOf === null ||
+        !isQuotaState(state)) {
+        throw quotaBodyUnknownError(status);
+    }
+    return {
+        subject: obj["subject"],
+        limit,
+        used,
+        remaining,
+        reset,
+        window_seconds: windowSeconds,
+        state,
+        enforced: obj["enforced"],
+        as_of: asOf,
+    };
+}
 /** Is this a browser-like environment (used to pick the default 401 hook)? */
 function inBrowser() {
     const g = globalThis;
@@ -405,5 +498,16 @@ export function createCailClient(opts) {
             throw error;
         }
     }
-    return { call };
+    async function getQuota(credential) {
+        const response = await call("/quota", { method: "GET" }, credential);
+        let body;
+        try {
+            body = await response.json();
+        }
+        catch {
+            throw quotaBodyUnknownError(response.status);
+        }
+        return parseQuotaSnapshotBody(body, response.status);
+    }
+    return { call, getQuota };
 }
