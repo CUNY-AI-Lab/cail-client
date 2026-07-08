@@ -1,0 +1,44 @@
+{
+  "name": "@cuny-ai-lab/cail-client",
+  "version": "1.0.0",
+  "description": "The CAIL model-proxy API client: a pure Web-standard fetch wrapper that owns the CAIL credential/header/error/retry contract. The consumer-side twin of @cuny-ai-lab/cail-identity. Runs unchanged in the browser, Cloudflare Workers, and Node >=20.",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build",
+    "prepare": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.6",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CUNY-AI-Lab/cail-client.git"
+  }
+}
