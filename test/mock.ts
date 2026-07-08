@@ -2,7 +2,7 @@
  * Recording mock `fetch` — the SHADOW proxy.
  *
  * It captures the OUTGOING request (URL + headers + body) exactly as it hits the
- * wire and returns a caller-supplied canned `Response`. The 26 vectors assert
+ * wire and returns a caller-supplied canned `Response`. The vectors assert
  * invariants on the CAPTURED WIRE, never on the client's internals — so the
  * suite validates the contract independently of the implementation (no circular
  * self-validation).
@@ -17,8 +17,11 @@ export interface CapturedRequest {
   body: string;
 }
 
-/** A canned response, or a sentinel that makes the mock throw a network error. */
-export type CannedResponse = Response | { networkError: true };
+/** A canned response, or a sentinel that makes the mock throw transport-style errors. */
+export type CannedResponse =
+  | Response
+  | { networkError: true }
+  | { abortableHang: true };
 
 export interface RecordingFetch {
   /** The injectable `fetchImpl`. */
@@ -80,6 +83,21 @@ export function recordingFetch(
     if ("networkError" in canned) {
       throw new TypeError("network error: failed to fetch (simulated)");
     }
+    if ("abortableHang" in canned) {
+      const signal = init?.signal;
+      await new Promise<never>((_resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+          return;
+        }
+        const onAbort = () => {
+          signal?.removeEventListener("abort", onAbort);
+          reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+      throw new Error("abortableHang response unexpectedly resolved");
+    }
     return canned;
   }) as typeof fetch;
 
@@ -118,10 +136,14 @@ export function envelope(
 }
 
 /** A non-JSON error response (e.g. a raw 500 HTML page). */
-export function nonJson(status: number, text: string): Response {
+export function nonJson(
+  status: number,
+  text: string,
+  extraHeaders?: Record<string, string>,
+): Response {
   return new Response(text, {
     status,
-    headers: { "content-type": "text/html" },
+    headers: { "content-type": "text/html", ...extraHeaders },
   });
 }
 

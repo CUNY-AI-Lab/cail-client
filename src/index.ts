@@ -105,8 +105,14 @@ export interface CailClient {
 
 const APP_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const RESERVED_METADATA_KEYS = new Set(["user_id", "app", "via"]);
+const POLLUTION_METADATA_KEYS = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
 const MAX_METADATA_KEYS = 8;
 const MAX_METADATA_STRING_LEN = 128;
+const CREDENTIAL_CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/;
 
 /**
  * Validate + serialize `X-CAIL-Metadata` (I3). Throws a `CailError` (code
@@ -128,6 +134,13 @@ function serializeMetadata(meta: CailMetadata): string {
       throw new CailError(
         "invalid_metadata",
         `X-CAIL-Metadata key "${key}" is reserved and cannot be set by the client.`,
+        0,
+      );
+    }
+    if (POLLUTION_METADATA_KEYS.has(key)) {
+      throw new CailError(
+        "invalid_metadata",
+        `X-CAIL-Metadata key "${key}" is not allowed.`,
         0,
       );
     }
@@ -234,8 +247,56 @@ function backoffDelayMs(attempt: number): number {
   return Math.min(200 * 2 ** attempt, 2000);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function abortReason(signal: AbortSignal): unknown {
+  if (signal.reason !== undefined) return signal.reason;
+  if (typeof DOMException !== "undefined") {
+    return new DOMException("The operation was aborted.", "AbortError");
+  }
+  const err = new Error("The operation was aborted.");
+  err.name = "AbortError";
+  return err;
+}
+
+function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", onAbort);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function retryDelayMs(response: Response, attempt: number): number {
+  const backoff = backoffDelayMs(attempt);
+  const retryAfter = response.headers.get("Retry-After");
+  if (retryAfter === null || !/^\d+$/.test(retryAfter)) return backoff;
+  const seconds = Number(retryAfter);
+  return Math.min(Math.max(backoff, seconds * 1000), 10_000);
+}
+
+function isReadableStreamBody(body: RequestInit["body"] | undefined): boolean {
+  return (
+    typeof ReadableStream !== "undefined" && body instanceof ReadableStream
+  );
+}
+
+function addRetryAfterExtra(
+  response: Response,
+  extras: Record<string, unknown>,
+): void {
+  const retryAfter = response.headers.get("Retry-After");
+  if (retryAfter !== null && !("retry_after" in extras)) {
+    extras["retry_after"] = retryAfter;
+  }
 }
 
 /**
@@ -267,32 +328,29 @@ export async function parseCailError(response: Response): Promise<CailError> {
     typeof parsed === "object" &&
     parsed !== null &&
     !Array.isArray(parsed) &&
-    typeof (parsed as Record<string, unknown>)["error"] === "string"
+    typeof (parsed as Record<string, unknown>)["error"] === "string" &&
+    typeof (parsed as Record<string, unknown>)["message"] === "string"
   ) {
     const obj = parsed as Record<string, unknown>;
     const code = obj["error"] as string;
-    const message =
-      typeof obj["message"] === "string"
-        ? (obj["message"] as string)
-        : `Request failed with status ${status}.`;
+    const message = obj["message"] as string;
     const extras: Record<string, unknown> = {};
     for (const key of Object.keys(obj)) {
       if (key !== "error" && key !== "message") extras[key] = obj[key];
     }
     // Preserve the Retry-After header alongside the envelope (INTEGRATION.md §2).
-    const retryAfter = response.headers.get("Retry-After");
-    if (retryAfter !== null && !("retry_after" in extras)) {
-      extras["retry_after"] = retryAfter;
-    }
+    addRetryAfterExtra(response, extras);
     return new CailError(code, message, status, extras);
   }
 
   // Non-JSON / shape-invalid body: NOT swallowed, NOT thrown away (I4).
+  const extras: Record<string, unknown> = {};
+  addRetryAfterExtra(response, extras);
   return new CailError(
     "unknown_error",
     `The CAIL backbone returned an unexpected response (status ${status}).`,
     status,
-    {},
+    extras,
   );
 }
 
@@ -366,6 +424,16 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         0,
       );
     }
+    if (
+      credential.token.length === 0 ||
+      CREDENTIAL_CONTROL_CHAR_RE.test(credential.token)
+    ) {
+      throw new CailError(
+        "invalid_credential",
+        "Credential token must be non-empty and contain no control characters.",
+        0,
+      );
+    }
 
     const headers = toHeaderRecord(init.headers);
 
@@ -393,7 +461,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     const headerMeta = existingMetadataHeader(headers);
     let merged: CailMetadata | undefined;
     if (headerMeta !== undefined || options?.metadata !== undefined) {
-      merged = {};
+      merged = Object.create(null) as CailMetadata;
       if (headerMeta !== undefined) {
         let base: unknown;
         try {
@@ -429,6 +497,8 @@ export function createCailClient(opts: CailClientOptions): CailClient {
 
     const url = `${baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
     // I8 — body + model forwarded verbatim: we never touch init.body.
+    const signal = init.signal;
+    const hasNonReplayableBody = isReadableStreamBody(init.body);
     const requestInit: RequestInit = { ...init, headers };
 
     let attempt = 0;
@@ -438,9 +508,14 @@ export function createCailClient(opts: CailClientOptions): CailClient {
       try {
         response = await fetchImpl(url, requestInit);
       } catch (err) {
+        if (signal?.aborted) throw err;
         // Network/transport error (I5): retry up to maxRetries, else throw.
-        if (isRetriableNetworkError(err) && attempt < maxRetries) {
-          await sleep(backoffDelayMs(attempt));
+        if (
+          !hasNonReplayableBody &&
+          isRetriableNetworkError(err) &&
+          attempt < maxRetries
+        ) {
+          await sleep(backoffDelayMs(attempt), signal);
           attempt++;
           continue;
         }
@@ -460,14 +535,14 @@ export function createCailClient(opts: CailClientOptions): CailClient {
 
       // I5 — retry policy: NEVER 4xx; retry 5xx up to maxRetries.
       const is5xx = response.status >= 500 && response.status < 600;
-      if (is5xx && attempt < maxRetries) {
+      if (is5xx && !hasNonReplayableBody && attempt < maxRetries) {
         // Drain the failed response body so the connection can be reused.
         try {
           await response.body?.cancel();
         } catch {
           /* ignore */
         }
-        await sleep(backoffDelayMs(attempt));
+        await sleep(retryDelayMs(response, attempt), signal);
         attempt++;
         continue;
       }
@@ -481,7 +556,11 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         error.code === "authentication_required" &&
         onAuthRequired
       ) {
-        onAuthRequired(error);
+        try {
+          onAuthRequired(error);
+        } catch {
+          // The hook is advisory; it must never mask the backbone error.
+        }
       }
 
       throw error;

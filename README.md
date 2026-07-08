@@ -140,12 +140,12 @@ Loosening or removing any invariant is a **major** semver bump.
 
 | # | Invariant | The client guarantees |
 |---|-----------|-----------------------|
-| **I1** | Exactly one credential on the wire | `kind:"jwt"` → sets `X-CAIL-Identity-JWT` **and deletes any `Authorization`** the caller/SDK injected (dummy-bearer strip; the proxy is JWT-first-strict). `kind:"key"` → `Authorization: Bearer <token>`, **no** JWT header. Never both. |
+| **I1** | Exactly one credential on the wire | `kind:"jwt"` → sets `X-CAIL-Identity-JWT` **and deletes any `Authorization`** the caller/SDK injected (dummy-bearer strip; the proxy is JWT-first-strict). `kind:"key"` → `Authorization: Bearer <token>`, **no** JWT header. Never both. Tokens must be non-empty and contain no control characters. |
 | **I2** | `X-CAIL-App` always sent | Equals the constructed `app`; the caller can't override it. The slug is validated against `/^[a-z0-9][a-z0-9-]{0,63}$/` — **invalid → throws at construction**. |
-| **I3** | `X-CAIL-Metadata` validated | Optional per call: ≤8 keys, `string`\|`number` values, string values ≤128 chars, reserved keys (`user_id`, `app`, `via`) rejected. Violations **throw**; valid metadata is serialized as JSON. |
-| **I4** | Error envelope → typed error, message verbatim | Non-2xx → `CailError{code, message, status, extras}`; `message` passed through **unmodified**. Non-JSON error body → `CailError{code:"unknown_error"}` — **never swallowed as success**. |
-| **I5** | Retry policy | **Never** retries 4xx. Retries 5xx + network up to `maxRetries` (default 2) with exponential backoff. |
-| **I6** | 401 hook | `401 authentication_required` → invokes `onAuthRequired(err)`, then **still throws**. Browser default: same-origin redirect to `err.extras.login_url` or `/login?rt=<path>`. |
+| **I3** | `X-CAIL-Metadata` validated | Optional per call: ≤8 keys, `string`\|`number` values, string values ≤128 chars, reserved keys (`user_id`, `app`, `via`) and pollution keys (`__proto__`, `constructor`, `prototype`) rejected. Violations **throw**; valid metadata is serialized as JSON. |
+| **I4** | Error envelope → typed error, message verbatim | Non-2xx → `CailError{code, message, status, extras}` only when both `error` and `message` are strings; `message` passed through **unmodified**. Non-JSON or malformed error body → `CailError{code:"unknown_error"}` — **never swallowed as success**. `Retry-After` is preserved as `extras.retry_after` when present. |
+| **I5** | Retry policy | **Never** retries 4xx, aborts, or one-shot `ReadableStream` request bodies. Retries 5xx + network up to `maxRetries` (default 2) with exponential backoff; integer `Retry-After` seconds on 5xx are honored up to a 10s cap. |
+| **I6** | 401 hook | `401 authentication_required` → invokes `onAuthRequired(err)`, then **still throws** the original `CailError` even if the hook throws. Browser default: same-origin redirect to `err.extras.login_url` or `/login?rt=<path>`. |
 | **I7** | 2xx passthrough, streams intact | Success `Response` returned **by reference** — body not buffered, so SSE streams pass through. |
 | **I8** | Body + model untouched | `init.body` forwarded verbatim; the client does **not** rewrite the `model` id (the proxy adds the `workers-ai/` prefix on compat routes). |
 
@@ -164,7 +164,7 @@ Loosening or removing any invariant is a **major** semver bump.
 npm install
 npm run typecheck   # tsc, source + tests
 npm run build       # emit dist/ (committed, so git-deps resolve)
-npm test            # the 26 contract vectors (vitest)
+npm test            # the contract vectors (vitest)
 ```
 
 The test suite injects a **recording mock** `fetch` that captures the outgoing
