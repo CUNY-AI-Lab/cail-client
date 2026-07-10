@@ -184,8 +184,21 @@ function toHeaderRecord(init) {
         });
     }
     else if (Array.isArray(init)) {
-        for (const [key, value] of init)
-            out[key] = value;
+        for (const [key, value] of init) {
+            let existingKey;
+            for (const k of Object.keys(out)) {
+                if (k.toLowerCase() === key.toLowerCase()) {
+                    existingKey = k;
+                    break;
+                }
+            }
+            if (existingKey !== undefined) {
+                out[existingKey] = `${out[existingKey]}, ${value}`;
+            }
+            else {
+                out[key] = value;
+            }
+        }
     }
     else {
         for (const [key, value] of Object.entries(init))
@@ -269,7 +282,12 @@ export async function parseCailError(response) {
     try {
         bodyText = await response.text();
     }
-    catch {
+    catch (err) {
+        if (err &&
+            typeof err === "object" &&
+            err.name === "AbortError") {
+            throw err;
+        }
         bodyText = "";
     }
     let parsed;
@@ -374,11 +392,13 @@ export function createCailClient(opts) {
     if (typeof fetchImpl !== "function") {
         throw new CailError("invalid_config", "No `fetch` available: pass `fetchImpl` in this runtime.", 0);
     }
-    const maxRetries = typeof opts.maxRetries === "number" && opts.maxRetries >= 0
+    const maxRetries = typeof opts.maxRetries === "number" &&
+        Number.isFinite(opts.maxRetries) &&
+        opts.maxRetries >= 0
         ? Math.floor(opts.maxRetries)
         : 2;
     const onAuthRequired = opts.onAuthRequired ?? (inBrowser() ? browserAuthRedirect : undefined);
-    async function call(path, init, credential, options) {
+    async function call(path, init, credential, options, internal) {
         if (typeof credential !== "object" ||
             credential === null ||
             (credential.kind !== "jwt" && credential.kind !== "key") ||
@@ -441,7 +461,8 @@ export function createCailClient(opts) {
         // I8 — body + model forwarded verbatim: we never touch init.body.
         const signal = init.signal;
         const hasNonReplayableBody = isReadableStreamBody(init.body);
-        const requestInit = { ...init, headers };
+        const retry5xx = internal?.retry5xx !== false;
+        const requestInit = { ...init, headers, redirect: "manual" };
         let attempt = 0;
         // Total tries = 1 + maxRetries.
         for (;;) {
@@ -464,13 +485,25 @@ export function createCailClient(opts) {
                     ? err.message
                     : "Network request to the CAIL backbone failed.", 0);
             }
+            // A redirect from the proxy is never a valid model-proxy response. With
+            // redirect:"manual" the platform surfaces it as an opaque redirect
+            // (status 0); a mock/transport may surface the raw 3xx. Either way: do NOT
+            // follow (would leak X-CAIL-Identity-JWT cross-origin) and do NOT treat as
+            // success — throw immediately, no retry.
+            if (response.type === "opaqueredirect" ||
+                (response.status >= 300 && response.status < 400)) {
+                throw new CailError("unexpected_redirect", `The CAIL backbone returned a redirect (status ${response.status}), which is never a valid model-proxy response.`, response.status);
+            }
             // I7 — 2xx passthrough by reference, body NOT buffered.
             if (response.status >= 200 && response.status < 300) {
                 return response;
             }
             // I5 — retry policy: NEVER 4xx; retry 5xx up to maxRetries.
             const is5xx = response.status >= 500 && response.status < 600;
-            if (is5xx && !hasNonReplayableBody && attempt < maxRetries) {
+            if (is5xx &&
+                retry5xx &&
+                !hasNonReplayableBody &&
+                attempt < maxRetries) {
                 // Drain the failed response body so the connection can be reused.
                 try {
                     await response.body?.cancel();
@@ -499,7 +532,7 @@ export function createCailClient(opts) {
         }
     }
     async function getQuota(credential) {
-        const response = await call("/quota", { method: "GET" }, credential);
+        const response = await call("/quota", { method: "GET" }, credential, undefined, { retry5xx: false });
         let body;
         try {
             body = await response.json();

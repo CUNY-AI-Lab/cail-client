@@ -94,6 +94,22 @@ describe("quota wire vectors", () => {
     });
   }
 
+  it("getQuota surfaces a persistent 503 without retrying", async () => {
+    const { rec, client } = clientFor(
+      envelope(503, {
+        error: "quota_unavailable",
+        message: "The quota meter is unavailable.",
+      }),
+    );
+
+    const err = await client.getQuota(KEY).catch((e) => e);
+
+    expect(err).toBeInstanceOf(CailError);
+    expect(err.code).toBe("quota_unavailable");
+    expect(err.status).toBe(503);
+    expect(rec.captured).toHaveLength(1);
+  });
+
   it("parseQuotaHeaders returns null when no quota headers are present", () => {
     const response = new Response(null, {
       headers: {

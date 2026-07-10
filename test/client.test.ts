@@ -140,6 +140,21 @@ describe("I2 — X-CAIL-App", () => {
     expect(rec.one.headers["x-cail-app"]).toBe(APP);
   });
 
+  it("array-form duplicate headers are combined like native Headers", async () => {
+    const headerPairs: [string, string][] = [
+      ["X-Trace", "first"],
+      ["X-Trace", "second"],
+    ];
+    const { rec, client } = wired(jsonOk({}));
+
+    await client.call("/v1", { headers: headerPairs }, JWT);
+
+    expect(rec.one.headers["x-trace"]).toBe("first, second");
+    expect(rec.one.headers["x-trace"]).toBe(
+      new Headers(headerPairs).get("x-trace"),
+    );
+  });
+
   it("V6 invalid app slug throws at construct (Bad App / empty / 65 chars)", () => {
     for (const bad of ["Bad App", "", "a".repeat(65), "-lead", "UPPER", "a b"]) {
       expect(() =>
@@ -342,6 +357,41 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
 // ── Retry policy (I5) ─────────────────────────────────────────────────────
 
 describe("I5 — retry policy", () => {
+  it("forces manual redirects even when the caller requests follow", async () => {
+    const rec = recordingFetch(jsonOk({ ok: true }));
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        expect(init?.redirect).toBe("manual");
+        return rec.fn(input, init);
+      },
+    ) as typeof fetch;
+    const client = createCailClient({
+      baseUrl: BASE,
+      app: APP,
+      fetchImpl,
+    });
+
+    await client.call("/v1", { redirect: "follow" }, JWT);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(rec.captured).toHaveLength(1);
+  });
+
+  it("rejects a proxy redirect as unexpected_redirect without retrying", async () => {
+    const redirect = new Response(null, {
+      status: 302,
+      headers: { Location: "https://evil.example/landing" },
+    });
+    const { rec, client } = wired(redirect);
+
+    const err = await client.call("/v1", {}, JWT).catch((e) => e);
+
+    expect(err).toBeInstanceOf(CailError);
+    expect(err.code).toBe("unexpected_redirect");
+    expect(err.status).toBe(302);
+    expect(rec.captured).toHaveLength(1);
+  });
+
   it("V20 500 then 200 → one retry, resolves", async () => {
     const { rec, client } = wired([
       envelope(500, { error: "server_error", message: "oops" }),
@@ -385,6 +435,18 @@ describe("I5 — retry policy", () => {
     const err = await client.call("/v1", {}, KEY).catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(rec.captured).toHaveLength(3); // 1 + 2 retries
+  });
+
+  it("non-finite maxRetries falls back to the default retry count", async () => {
+    const { rec, client } = wired(
+      envelope(500, { error: "server_error", message: "still down" }),
+      { maxRetries: Infinity },
+    );
+
+    const err = await client.call("/v1", {}, KEY).catch((e) => e);
+
+    expect(err).toBeInstanceOf(CailError);
+    expect(rec.captured).toHaveLength(3);
   });
 
   it("V27 abort mid-flight rejects with original AbortError and does not retry", async () => {
@@ -618,5 +680,19 @@ describe("parseCailError (standalone)", () => {
   it("non-JSON → unknown_error", async () => {
     const err = await parseCailError(nonJson(500, "boom"));
     expect(err.code).toBe("unknown_error");
+  });
+
+  it("preserves AbortError thrown while reading an error body", async () => {
+    const response = new Response(null, { status: 400 });
+    Object.defineProperty(response, "text", {
+      value: async () => {
+        throw new DOMException("aborted", "AbortError");
+      },
+    });
+
+    const err = await parseCailError(response).catch((e) => e);
+
+    expect(err).not.toBeInstanceOf(CailError);
+    expect(err.name).toBe("AbortError");
   });
 });
