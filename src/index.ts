@@ -101,7 +101,12 @@ export interface CailClientOptions {
   onAuthRequired?: (err: CailError) => void;
   /** Injectable fetch (tests / custom transports). Default: the global `fetch`. */
   fetchImpl?: typeof fetch;
-  /** Max retries for 5xx + network errors (I5). Default 2. Never applies to 4xx. */
+  /**
+   * Max retries for 5xx + network errors (I5). Default 2 (when absent). Never
+   * applies to 4xx. A PRESENT value must be a finite integer >= 0 — anything
+   * else throws `invalid_config` at construction (fail loud, matching
+   * `baseUrl`/`app`/`fetchImpl`; invalid config is never silently coerced).
+   */
   maxRetries?: number;
 }
 
@@ -624,12 +629,26 @@ export function createCailClient(opts: CailClientOptions): CailClient {
       0,
     );
   }
-  const maxRetries =
-    typeof opts.maxRetries === "number" &&
-    Number.isFinite(opts.maxRetries) &&
-    opts.maxRetries >= 0
-      ? Math.floor(opts.maxRetries)
-      : 2;
+  // Invalid-config posture (aligned with the sibling fields above and with the
+  // cail-identity twin's non-finite `now`/`clockToleranceSeconds` rejection):
+  // absent means "use the default", but a PRESENT invalid value fails loud —
+  // it is never silently coerced to the default.
+  let maxRetries: number;
+  if (opts.maxRetries === undefined) {
+    maxRetries = 2;
+  } else if (
+    typeof opts.maxRetries !== "number" ||
+    !Number.isInteger(opts.maxRetries) ||
+    opts.maxRetries < 0
+  ) {
+    throw new CailError(
+      "invalid_config",
+      "`maxRetries` must be a finite integer >= 0 when present (omit it for the default of 2).",
+      0,
+    );
+  } else {
+    maxRetries = opts.maxRetries;
+  }
   const onAuthRequired =
     opts.onAuthRequired ?? (inBrowser() ? browserAuthRedirect : undefined);
 

@@ -85,7 +85,12 @@ export interface CailClientOptions {
     onAuthRequired?: (err: CailError) => void;
     /** Injectable fetch (tests / custom transports). Default: the global `fetch`. */
     fetchImpl?: typeof fetch;
-    /** Max retries for 5xx + network errors (I5). Default 2. Never applies to 4xx. */
+    /**
+     * Max retries for 5xx + network errors (I5). Default 2 (when absent). Never
+     * applies to 4xx. A PRESENT value must be a finite integer >= 0 — anything
+     * else throws `invalid_config` at construction (fail loud, matching
+     * `baseUrl`/`app`/`fetchImpl`; invalid config is never silently coerced).
+     */
     maxRetries?: number;
 }
 export interface CailCallOptions {

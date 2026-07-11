@@ -160,7 +160,9 @@ Tokens must be non-empty and contain no control characters.
 Non-success responses throw `CailError { code, message, status, extras }`.
 Gateway error messages are preserved verbatim. The client never retries 4xx,
 aborted requests, or requests with one-shot stream bodies. It retries network
-and 5xx failures up to `maxRetries` (default 2).
+and 5xx failures up to `maxRetries` (default 2 when omitted). A present but
+invalid `maxRetries` — anything other than a finite integer >= 0 — throws
+`invalid_config` at construction; invalid config is never silently coerced.
 
 A `401 authentication_required` response invokes `onAuthRequired` and still
 throws the original error. In a browser, the default hook performs a guarded

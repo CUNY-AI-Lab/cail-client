@@ -428,25 +428,61 @@ describe("I5 — retry policy", () => {
   });
 
   it("V23b retries exhausted on persistent 5xx → throws typed", async () => {
-    const { rec, client } = wired(
-      envelope(500, { error: "server_error", message: "still down" }),
-      { maxRetries: 2 },
-    );
+    // One envelope per expected wire call (the mock throws on over-calling).
+    const down = () => envelope(500, { error: "server_error", message: "still down" });
+    const { rec, client } = wired([down(), down(), down()], { maxRetries: 2 });
     const err = await client.call("/models", {}, KEY).catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(rec.captured).toHaveLength(3); // 1 + 2 retries
   });
 
-  it("non-finite maxRetries falls back to the default retry count", async () => {
-    const { rec, client } = wired(
-      envelope(500, { error: "server_error", message: "still down" }),
-      { maxRetries: Infinity },
-    );
+  it("V23c present-but-invalid maxRetries throws invalid_config at construction (never silently coerced)", () => {
+    for (const bad of [
+      NaN,
+      Infinity,
+      -Infinity,
+      -1,
+      2.5,
+      "3" as unknown as number,
+    ]) {
+      let err: unknown = null;
+      try {
+        createCailClient({
+          baseUrl: BASE,
+          app: APP,
+          fetchImpl: recordingFetch(jsonOk({})).fn,
+          maxRetries: bad,
+        });
+      } catch (e) {
+        err = e;
+      }
+      expect(err, `maxRetries=${String(bad)} must throw`).toBeInstanceOf(CailError);
+      expect((err as CailError).code).toBe("invalid_config");
+      expect((err as CailError).message).toContain("maxRetries");
+    }
+  });
 
-    const err = await client.call("/models", {}, KEY).catch((e) => e);
-
-    expect(err).toBeInstanceOf(CailError);
-    expect(rec.captured).toHaveLength(3);
+  it("V23d absent maxRetries defaults to 2 (1 + 2 attempts); valid values honored", async () => {
+    // Absent → default 2 retries: exactly three wire calls.
+    const down = () => envelope(500, { error: "server_error", message: "still down" });
+    {
+      const { rec, client } = wired([down(), down(), down()]);
+      const err = await client.call("/models", {}, KEY).catch((e) => e);
+      expect(err).toBeInstanceOf(CailError);
+      expect(rec.captured).toHaveLength(3);
+    }
+    // Valid 0 honored: exactly one wire call.
+    {
+      const { rec, client } = wired(down(), { maxRetries: 0 });
+      await client.call("/models", {}, KEY).catch(() => {});
+      expect(rec.captured).toHaveLength(1);
+    }
+    // Valid 1 honored: exactly two wire calls.
+    {
+      const { rec, client } = wired([down(), down()], { maxRetries: 1 });
+      await client.call("/models", {}, KEY).catch(() => {});
+      expect(rec.captured).toHaveLength(2);
+    }
   });
 
   it("V27 abort mid-flight rejects with original AbortError and does not retry", async () => {
@@ -891,5 +927,18 @@ describe("chatFetch — SDK adapter", () => {
     await expect(
       client.chatFetch(JWT)(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] })),
     ).rejects.toMatchObject({ code: "unexpected_redirect" });
+  });
+});
+
+// ── recording mock — over-calling guard ───────────────────────────────────
+
+describe("recording mock — over-calling guard", () => {
+  it("a call beyond the queued responses throws (never silently reuses the last response)", async () => {
+    const rec = recordingFetch(jsonOk({ ok: true }));
+    const first = await rec.fn("https://x.example/one", { method: "GET" });
+    expect(first.status).toBe(200);
+    await expect(
+      rec.fn("https://x.example/two", { method: "GET" }),
+    ).rejects.toThrow(/unexpected call #2/);
   });
 });

@@ -33,8 +33,11 @@ export interface RecordingFetch {
 }
 
 /**
- * Build a recording fetch that returns the given canned responses in order
- * (the last is reused if there are more calls than responses).
+ * Build a recording fetch that returns the given canned responses in order.
+ * A call beyond the queued responses THROWS: over-calling is impossible by
+ * construction, so a test that forgets to assert `captured.length` still
+ * cannot miss an over-calling regression (e.g. an accidental 4xx retry).
+ * Queue exactly one canned response per expected wire call.
  */
 export function recordingFetch(
   responses: CannedResponse | CannedResponse[],
@@ -77,7 +80,13 @@ export function recordingFetch(
 
     captured.push({ url, method, headers, body });
 
-    const canned = queue[Math.min(call, queue.length - 1)]!;
+    if (call >= queue.length) {
+      throw new Error(
+        `recordingFetch: unexpected call #${call + 1} — only ${queue.length} canned response(s) queued. ` +
+          "Over-calling is a bug; queue one canned response per expected wire call.",
+      );
+    }
+    const canned = queue[call]!;
     call++;
 
     if ("networkError" in canned) {
