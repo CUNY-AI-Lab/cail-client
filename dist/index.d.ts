@@ -20,7 +20,13 @@
  *   - `401 authentication_required` invokes `onAuthRequired`, then still throws
  *     (I6).
  *   - 2xx `Response` returned by reference, body NOT buffered (I7).
- *   - `run()` owns the canonical `POST /v1/run` `{model,input}` contract (I8).
+ *   - `run()` and `chatCompletions()` own the canonical model endpoints (I8):
+ *     buffered `POST /v1/run` `{model,input}` and OpenAI-shaped
+ *     `POST /v1/chat/completions` (streaming-capable — the 2xx `Response`
+ *     passes through by reference per I7, so SSE flows untouched).
+ *     `chatFetch()` adapts the chat endpoint for OpenAI-style SDKs with raw
+ *     fetch semantics (non-2xx returned, not thrown; no client-side retries —
+ *     the SDK owns those).
  *   - Quota headers are advisory and all-or-none: absent/malformed quota
  *     headers mean "meter unavailable", never a client error (I9).
  *
@@ -91,6 +97,18 @@ export interface CailRunRequest {
     model: string;
     input: unknown;
 }
+/**
+ * The OpenAI-compatible chat request accepted by `POST /v1/chat/completions`.
+ * Extra OpenAI parameters (`temperature`, `max_tokens`, `tools`,
+ * `stream_options`, …) pass through verbatim; the gateway force-injects
+ * `stream_options.include_usage` on streams for its own metering.
+ */
+export interface CailChatRequest {
+    model: string;
+    messages: unknown[];
+    stream?: boolean;
+    [key: string]: unknown;
+}
 export interface CailClient {
     /**
      * Run a model through the canonical `POST /v1/run` endpoint. The request
@@ -98,8 +116,27 @@ export interface CailClient {
      */
     run(request: CailRunRequest, credential: CailCredential, options?: CailCallOptions): Promise<Response>;
     /**
+     * Run an OpenAI-compatible chat call through `POST /v1/chat/completions`.
+     * With `stream: true` the returned 2xx `Response` body is the live SSE
+     * stream (I7 — by reference, never buffered): read `chat.completion.chunk`
+     * events until `data: [DONE]`. Non-2xx throws the usual {@link CailError}.
+     */
+    chatCompletions(request: CailChatRequest, credential: CailCredential, options?: CailCallOptions): Promise<Response>;
+    /**
+     * Build a `fetch`-shaped adapter for OpenAI-style SDKs (e.g. the Vercel AI
+     * SDK's `createOpenAICompatible({ fetch })`): it enforces the credential /
+     * app / metadata discipline (I1–I3) and the redirect protection, but keeps
+     * RAW FETCH SEMANTICS — non-2xx responses are returned (not thrown) and the
+     * client never retries (the SDK owns retry policy). It serves ONLY
+     * `POST {baseUrl}/v1/chat/completions`; any other URL throws, catching SDK
+     * base-URL misconfiguration loudly. The 401 `onAuthRequired` hook still
+     * fires (on a cloned body) before the response is returned.
+     */
+    chatFetch(credential: CailCredential, options?: CailCallOptions): (input: string | URL, init?: RequestInit) => Promise<Response>;
+    /**
      * Call a non-model gateway endpoint such as `/models`, `/quota`, or key
-     * delegation. Model invocation belongs in {@link run}.
+     * delegation. Model invocation belongs in {@link run} /
+     * {@link chatCompletions}.
      *
      * @param path   joined onto `baseUrl`.
      * @param init   method, body, and headers for the gateway endpoint.

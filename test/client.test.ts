@@ -722,3 +722,155 @@ describe("parseCailError (standalone)", () => {
     expect(err.name).toBe("AbortError");
   });
 });
+
+// ── I8 extension — canonical chat completions ─────────────────────────────
+
+describe("I8 — canonical chat completions", () => {
+  it("V27 POSTs the OpenAI body verbatim to /v1/chat/completions (client never injects stream_options)", async () => {
+    const request = {
+      model: "@cf/example/text-model",
+      messages: [{ role: "user", content: "hi" }],
+      stream: true,
+      temperature: 0.2,
+    };
+    const { rec, client } = wired(jsonOk({ ok: true }));
+    await client.chatCompletions(request, JWT, { metadata: { purpose: "t" } });
+    expect(rec.one.url).toBe(`${BASE}/v1/chat/completions`);
+    expect(rec.one.method).toBe("POST");
+    expect(rec.one.headers["content-type"]).toBe("application/json");
+    expect(rec.one.headers["x-cail-app"]).toBe(APP);
+    expect(JSON.parse(rec.one.body)).toEqual(request); // verbatim — include_usage is the gateway's job
+  });
+
+  it("V28 streaming Response passes through by reference, first chunk readable before close", async () => {
+    const stream = sseStream(["data: {\"choices\":[]}\n\n", "data: [DONE]\n\n"], 30);
+    const { client } = wired(stream);
+    const resp = await client.chatCompletions(
+      { model: "@cf/m/x", messages: [], stream: true },
+      KEY,
+    );
+    expect(resp).toBe(stream);
+    const reader = resp.body!.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toContain("choices");
+    expect(
+      (stream as unknown as { __closed: () => boolean }).__closed(),
+    ).toBe(false); // not buffered
+    reader.cancel();
+  });
+
+  it("V29 rejects malformed requests before fetch; non-2xx throws the envelope", async () => {
+    const { rec, client } = wired(
+      envelope(429, {
+        error: "quota_exceeded",
+        message: "over budget",
+        retry_after_seconds: 9,
+      }),
+    );
+    await expect(
+      client.chatCompletions({ model: "", messages: [] }, KEY),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
+    await expect(
+      client.chatCompletions({ model: "@cf/m/x", messages: "no" as unknown as unknown[] }, KEY),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
+    await expect(
+      client.chatCompletions(
+        { model: "@cf/m/x", messages: [], stream: "yes" as unknown as boolean },
+        KEY,
+      ),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
+    expect(rec.captured).toHaveLength(0);
+    await expect(
+      client.chatCompletions({ model: "@cf/m/x", messages: [] }, KEY),
+    ).rejects.toMatchObject({ code: "quota_exceeded", status: 429 });
+  });
+
+  it("V30 generic call() cannot invoke /v1/chat/completions", async () => {
+    const { rec, client } = wired(jsonOk({}));
+    await expect(
+      client.call("/v1/chat/completions", { method: "POST" }, KEY),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
+    expect(rec.captured).toHaveLength(0);
+  });
+});
+
+// ── chatFetch — the OpenAI-SDK adapter (raw fetch semantics) ──────────────
+
+describe("chatFetch — SDK adapter", () => {
+  const CHAT_URL = `${BASE}/v1/chat/completions`;
+  const sdkInit = (body: unknown): RequestInit => ({
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: "Bearer cail-proxy", // the AI-SDK dummy-key footgun
+    },
+    body: JSON.stringify(body),
+  });
+
+  it("V31 applies I1/I2 discipline: dummy Authorization stripped, JWT + app slug on the wire", async () => {
+    const { rec, client } = wired(jsonOk({ ok: true }));
+    const fetchLike = client.chatFetch(JWT);
+    await fetchLike(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] }));
+    expect(rec.one.headers["authorization"]).toBeUndefined();
+    expect(rec.one.headers["x-cail-identity-jwt"]).toBe("jwt-token-abc");
+    expect(rec.one.headers["x-cail-app"]).toBe(APP);
+  });
+
+  it("V32 raw semantics: 429 returned (not thrown), exactly one wire call (no client retry)", async () => {
+    const { rec, client } = wired([
+      envelope(429, { error: "quota_exceeded", message: "over" }),
+      jsonOk({ never: "reached" }),
+    ]);
+    const fetchLike = client.chatFetch(KEY);
+    const resp = await fetchLike(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] }));
+    expect(resp.status).toBe(429);
+    expect(((await resp.json()) as { error: string }).error).toBe("quota_exceeded");
+    expect(rec.captured).toHaveLength(1);
+  });
+
+  it("V32b raw semantics: 500 returned unretried; network error rethrown as-is", async () => {
+    const { rec, client } = wired([nonJson(500, "boom"), jsonOk({})]);
+    const fetchLike = client.chatFetch(KEY);
+    const resp = await fetchLike(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] }));
+    expect(resp.status).toBe(500);
+    expect(rec.captured).toHaveLength(1);
+
+    const netErr = wired({ networkError: true });
+    await expect(
+      netErr.client.chatFetch(KEY)(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] })),
+    ).rejects.toThrowError(TypeError); // platform error preserved, not CailError-wrapped
+  });
+
+  it("V33 401 fires onAuthRequired on a clone; SDK still receives a readable body", async () => {
+    const seen: unknown[] = [];
+    const { client } = wired(
+      envelope(401, { error: "authentication_required", message: "sign in", login_url: "/login" }),
+      { onAuthRequired: (err) => void seen.push(err.code) },
+    );
+    const resp = await client.chatFetch(JWT)(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] }));
+    expect(resp.status).toBe(401);
+    expect(seen).toEqual(["authentication_required"]);
+    expect(((await resp.json()) as { error: string }).error).toBe("authentication_required"); // body intact
+  });
+
+  it("V34 serves ONLY the chat-completions URL — anything else throws before fetch", async () => {
+    const { rec, client } = wired(jsonOk({}));
+    const fetchLike = client.chatFetch(KEY);
+    for (const bad of [`${BASE}/v1/run`, `${BASE}/models`, "https://evil.example/v1/chat/completions"]) {
+      await expect(fetchLike(bad, sdkInit({}))).rejects.toMatchObject({
+        code: "invalid_request",
+        status: 0,
+      });
+    }
+    expect(rec.captured).toHaveLength(0);
+  });
+
+  it("V35 redirect protection still applies in raw mode (JWT never follows cross-origin)", async () => {
+    const { client } = wired(
+      new Response(null, { status: 302, headers: { location: "https://evil.example/" } }),
+    );
+    await expect(
+      client.chatFetch(JWT)(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] })),
+    ).rejects.toMatchObject({ code: "unexpected_redirect" });
+  });
+});

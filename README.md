@@ -63,6 +63,57 @@ The successful `Response` is returned by reference. Use
 `parseQuotaHeaders(response.headers)` to read advisory quota headers without
 buffering or changing the response body.
 
+`run()` is buffered by design (the gateway rejects `input.stream`). For
+streaming chat, use `chatCompletions()`.
+
+## Streaming chat
+
+`chatCompletions()` sends the OpenAI chat shape to
+`POST {baseUrl}/v1/chat/completions`. With `stream: true` the returned
+`Response` body is the live SSE stream — `chat.completion.chunk` events
+ending in `data: [DONE]`:
+
+```ts
+const response = await cail.chatCompletions(
+  {
+    model: selectedModel,
+    messages: [{ role: "user", content: "Count to three." }],
+    stream: true,
+  },
+  { kind: "jwt", token: identityJwt },
+);
+// response.body is the SSE stream, untouched.
+```
+
+Extra OpenAI parameters (`temperature`, `max_tokens`, `tools`, …) pass
+through verbatim. The gateway meters streamed spend itself (it force-injects
+`stream_options.include_usage` upstream); the client never rewrites the body.
+
+### With the Vercel AI SDK
+
+`chatFetch()` builds a `fetch`-shaped adapter that owns the credential and
+header discipline, so tools stop hand-rolling it:
+
+```ts
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+
+const provider = createOpenAICompatible({
+  name: "cail",
+  baseURL: `${CAIL_API_BASE}/v1`,
+  apiKey: "cail-proxy", // dummy — the adapter strips it and sends the real credential
+  fetch: cail.chatFetch({ kind: "jwt", token: identityJwt }),
+});
+
+const result = streamText({ model: provider(selectedModel), messages });
+```
+
+The adapter keeps raw fetch semantics: non-2xx responses are returned (the
+SDK parses them and owns retries), the client's own retry loop is disabled,
+redirects still throw (the identity JWT never follows a redirect), and the
+`onAuthRequired` hook still fires on 401s. It serves only
+`POST {baseUrl}/v1/chat/completions` — any other URL throws, which catches
+SDK base-URL misconfiguration loudly.
+
 ## Other gateway endpoints
 
 `call()` remains available for non-model gateway endpoints such as `/models`
@@ -110,6 +161,10 @@ same-origin login redirect.
 
 - `createCailClient(options): CailClient`
 - `CailClient.run(request, credential, options?): Promise<Response>`
+- `CailClient.chatCompletions(request, credential, options?): Promise<Response>`
+  (streaming-capable)
+- `CailClient.chatFetch(credential, options?): (url, init?) => Promise<Response>`
+  adapter for OpenAI-style SDKs (raw fetch semantics)
 - `CailClient.call(path, init, credential, options?): Promise<Response>` for
   non-model endpoints
 - `CailClient.getQuota(credential): Promise<CailQuotaSnapshot>`

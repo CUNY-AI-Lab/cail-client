@@ -20,7 +20,13 @@
  *   - `401 authentication_required` invokes `onAuthRequired`, then still throws
  *     (I6).
  *   - 2xx `Response` returned by reference, body NOT buffered (I7).
- *   - `run()` owns the canonical `POST /v1/run` `{model,input}` contract (I8).
+ *   - `run()` and `chatCompletions()` own the canonical model endpoints (I8):
+ *     buffered `POST /v1/run` `{model,input}` and OpenAI-shaped
+ *     `POST /v1/chat/completions` (streaming-capable — the 2xx `Response`
+ *     passes through by reference per I7, so SSE flows untouched).
+ *     `chatFetch()` adapts the chat endpoint for OpenAI-style SDKs with raw
+ *     fetch semantics (non-2xx returned, not thrown; no client-side retries —
+ *     the SDK owns those).
  *   - Quota headers are advisory and all-or-none: absent/malformed quota
  *     headers mean "meter unavailable", never a client error (I9).
  *
@@ -110,6 +116,19 @@ export interface CailRunRequest {
   input: unknown;
 }
 
+/**
+ * The OpenAI-compatible chat request accepted by `POST /v1/chat/completions`.
+ * Extra OpenAI parameters (`temperature`, `max_tokens`, `tools`,
+ * `stream_options`, …) pass through verbatim; the gateway force-injects
+ * `stream_options.include_usage` on streams for its own metering.
+ */
+export interface CailChatRequest {
+  model: string;
+  messages: unknown[];
+  stream?: boolean;
+  [key: string]: unknown;
+}
+
 export interface CailClient {
   /**
    * Run a model through the canonical `POST /v1/run` endpoint. The request
@@ -122,8 +141,36 @@ export interface CailClient {
   ): Promise<Response>;
 
   /**
+   * Run an OpenAI-compatible chat call through `POST /v1/chat/completions`.
+   * With `stream: true` the returned 2xx `Response` body is the live SSE
+   * stream (I7 — by reference, never buffered): read `chat.completion.chunk`
+   * events until `data: [DONE]`. Non-2xx throws the usual {@link CailError}.
+   */
+  chatCompletions(
+    request: CailChatRequest,
+    credential: CailCredential,
+    options?: CailCallOptions,
+  ): Promise<Response>;
+
+  /**
+   * Build a `fetch`-shaped adapter for OpenAI-style SDKs (e.g. the Vercel AI
+   * SDK's `createOpenAICompatible({ fetch })`): it enforces the credential /
+   * app / metadata discipline (I1–I3) and the redirect protection, but keeps
+   * RAW FETCH SEMANTICS — non-2xx responses are returned (not thrown) and the
+   * client never retries (the SDK owns retry policy). It serves ONLY
+   * `POST {baseUrl}/v1/chat/completions`; any other URL throws, catching SDK
+   * base-URL misconfiguration loudly. The 401 `onAuthRequired` hook still
+   * fires (on a cloned body) before the response is returned.
+   */
+  chatFetch(
+    credential: CailCredential,
+    options?: CailCallOptions,
+  ): (input: string | URL, init?: RequestInit) => Promise<Response>;
+
+  /**
    * Call a non-model gateway endpoint such as `/models`, `/quota`, or key
-   * delegation. Model invocation belongs in {@link run}.
+   * delegation. Model invocation belongs in {@link run} /
+   * {@link chatCompletions}.
    *
    * @param path   joined onto `baseUrl`.
    * @param init   method, body, and headers for the gateway endpoint.
@@ -591,12 +638,15 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     init: RequestInit,
     credential: CailCredential,
     options?: CailCallOptions,
-    internal?: { retry5xx?: boolean; modelRun?: boolean },
+    internal?: { retry5xx?: boolean; modelRun?: boolean; raw?: boolean },
   ): Promise<Response> {
-    if (path === "/v1/run" && internal?.modelRun !== true) {
+    if (
+      (path === "/v1/run" || path === "/v1/chat/completions") &&
+      internal?.modelRun !== true
+    ) {
       throw new CailError(
         "invalid_request",
-        "Use run() for model invocation.",
+        "Use run() or chatCompletions() for model invocation.",
         0,
       );
     }
@@ -699,6 +749,10 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         response = await fetchImpl(url, requestInit);
       } catch (err) {
         if (signal?.aborted) throw err;
+        // Raw mode (chatFetch): preserve fetch semantics — the SDK recognizes
+        // its platform's own network errors; a CailError wrap would not be
+        // retried by it. No client-side retry either (the SDK owns those).
+        if (internal?.raw === true) throw err;
         // Network/transport error (I5): retry up to maxRetries, else throw.
         if (
           !hasNonReplayableBody &&
@@ -736,6 +790,22 @@ export function createCailClient(opts: CailClientOptions): CailClient {
 
       // I7 — 2xx passthrough by reference, body NOT buffered.
       if (response.status >= 200 && response.status < 300) {
+        return response;
+      }
+
+      // Raw mode (chatFetch): non-2xx is RETURNED, not thrown — the SDK parses
+      // provider error bodies and owns retry/backoff. The 401 hook (I6) still
+      // fires so browser tools can bounce to login; it inspects a CLONE so the
+      // body the SDK reads stays intact.
+      if (internal?.raw === true) {
+        if (response.status === 401 && onAuthRequired) {
+          try {
+            const peek = await parseCailError(response.clone());
+            if (peek.code === "authentication_required") onAuthRequired(peek);
+          } catch {
+            // Advisory only; never mask the response.
+          }
+        }
         return response;
       }
 
@@ -841,5 +911,79 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     );
   }
 
-  return { run, call, getQuota };
+  async function chatCompletions(
+    request: CailChatRequest,
+    credential: CailCredential,
+    options?: CailCallOptions,
+  ): Promise<Response> {
+    if (
+      typeof request !== "object" ||
+      request === null ||
+      typeof request.model !== "string" ||
+      request.model.length === 0 ||
+      !Array.isArray(request.messages) ||
+      (request.stream !== undefined && typeof request.stream !== "boolean")
+    ) {
+      throw new CailError(
+        "invalid_request",
+        "chatCompletions() requires { model: string, messages: unknown[] } with optional boolean stream.",
+        0,
+      );
+    }
+
+    let body: string;
+    try {
+      body = JSON.stringify(request);
+    } catch {
+      throw new CailError(
+        "invalid_request",
+        "chatCompletions() request must be JSON-serializable.",
+        0,
+      );
+    }
+
+    return call(
+      "/v1/chat/completions",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      },
+      credential,
+      options,
+      { modelRun: true },
+    );
+  }
+
+  function chatFetch(
+    credential: CailCredential,
+    options?: CailCallOptions,
+  ): (input: string | URL, init?: RequestInit) => Promise<Response> {
+    const target = `${baseUrl}/v1/chat/completions`;
+    return async (input, init) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : undefined;
+      if (url !== target) {
+        throw new CailError(
+          "invalid_request",
+          `chatFetch() serves only POST ${target}; got ${String(url ?? input)}. ` +
+            "Point the SDK baseURL at `${baseUrl}/v1` so it derives /v1/chat/completions.",
+          0,
+        );
+      }
+      return call(
+        "/v1/chat/completions",
+        init ?? {},
+        credential,
+        options,
+        { modelRun: true, raw: true, retry5xx: false },
+      );
+    };
+  }
+
+  return { run, chatCompletions, chatFetch, call, getQuota };
 }
