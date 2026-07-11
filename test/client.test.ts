@@ -53,7 +53,7 @@ function readableBody(text = "hello-stream"): ReadableStream<Uint8Array> {
 describe("I1 — exactly one credential on the wire", () => {
   it("V1 jwt path sets X-CAIL-Identity-JWT and no Authorization", async () => {
     const { rec, client } = wired(jsonOk({ ok: true }));
-    await client.call("/v1/compat/chat/completions", { method: "POST" }, JWT);
+    await client.call("/models", { method: "POST" }, JWT);
     expect(rec.one.headers["x-cail-identity-jwt"]).toBe("jwt-token-abc");
     expect(rec.one.headers["authorization"]).toBeUndefined();
   });
@@ -61,7 +61,7 @@ describe("I1 — exactly one credential on the wire", () => {
   it("V2 jwt path STRIPS a caller-injected dummy Authorization (the footgun)", async () => {
     const { rec, client } = wired(jsonOk({ ok: true }));
     await client.call(
-      "/v1/compat/chat/completions",
+      "/models",
       { method: "POST", headers: { Authorization: "Bearer dummy" } },
       JWT,
     );
@@ -71,7 +71,7 @@ describe("I1 — exactly one credential on the wire", () => {
 
   it("V3 key path sets Authorization: Bearer <key> and no JWT header", async () => {
     const { rec, client } = wired(jsonOk({ ok: true }));
-    await client.call("/v1/compat/chat/completions", { method: "POST" }, KEY);
+    await client.call("/models", { method: "POST" }, KEY);
     expect(rec.one.headers["authorization"]).toBe("Bearer sk-cail-xyz");
     expect(rec.one.headers["x-cail-identity-jwt"]).toBeUndefined();
   });
@@ -81,7 +81,7 @@ describe("I1 — exactly one credential on the wire", () => {
     {
       const { rec, client } = wired(jsonOk({ ok: true }));
       await client.call(
-        "/v1",
+        "/models",
         { headers: { "X-CAIL-Identity-JWT": "stale", Authorization: "Bearer d" } },
         JWT,
       );
@@ -94,7 +94,7 @@ describe("I1 — exactly one credential on the wire", () => {
     {
       const { rec, client } = wired(jsonOk({ ok: true }));
       await client.call(
-        "/v1",
+        "/models",
         { headers: { "X-CAIL-Identity-JWT": "stale" } },
         KEY,
       );
@@ -114,7 +114,7 @@ describe("I1 — exactly one credential on the wire", () => {
       fetchImpl: rec.fn,
     });
     const err = await client
-      .call("/v1", {}, { kind: "key", token: "sk\r\nX-Evil: 1" })
+      .call("/models", {}, { kind: "key", token: "sk\r\nX-Evil: 1" })
       .catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(err.code).toBe("invalid_credential");
@@ -128,15 +128,15 @@ describe("I1 — exactly one credential on the wire", () => {
 describe("I2 — X-CAIL-App", () => {
   it("V5 X-CAIL-App present == constructed slug on every call", async () => {
     const { rec, client } = wired([jsonOk({ a: 1 }), jsonOk({ b: 2 })]);
-    await client.call("/v1", {}, JWT);
-    await client.call("/v1", {}, KEY);
+    await client.call("/models", {}, JWT);
+    await client.call("/models", {}, KEY);
     expect(rec.captured).toHaveLength(2);
     for (const c of rec.captured) expect(c.headers["x-cail-app"]).toBe(APP);
   });
 
   it("V5b caller cannot override X-CAIL-App", async () => {
     const { rec, client } = wired(jsonOk({}));
-    await client.call("/v1", { headers: { "X-CAIL-App": "evil" } }, JWT);
+    await client.call("/models", { headers: { "X-CAIL-App": "evil" } }, JWT);
     expect(rec.one.headers["x-cail-app"]).toBe(APP);
   });
 
@@ -147,7 +147,7 @@ describe("I2 — X-CAIL-App", () => {
     ];
     const { rec, client } = wired(jsonOk({}));
 
-    await client.call("/v1", { headers: headerPairs }, JWT);
+    await client.call("/models", { headers: headerPairs }, JWT);
 
     expect(rec.one.headers["x-trace"]).toBe("first, second");
     expect(rec.one.headers["x-trace"]).toBe(
@@ -175,7 +175,7 @@ describe("I2 — X-CAIL-App", () => {
 describe("I3 — X-CAIL-Metadata validation", () => {
   it("V7 metadata {project:'x'} → X-CAIL-Metadata JSON present", async () => {
     const { rec, client } = wired(jsonOk({}));
-    await client.call("/v1", {}, JWT, { metadata: { project: "x" } });
+    await client.call("/models", {}, JWT, { metadata: { project: "x" } });
     expect(rec.one.headers["x-cail-metadata"]).toBe(JSON.stringify({ project: "x" }));
   });
 
@@ -183,27 +183,27 @@ describe("I3 — X-CAIL-Metadata validation", () => {
     const { client } = wired(jsonOk({}));
     const meta: Record<string, string> = {};
     for (let i = 0; i < 9; i++) meta[`k${i}`] = "v";
-    await expect(client.call("/v1", {}, JWT, { metadata: meta })).rejects.toBeInstanceOf(CailError);
+    await expect(client.call("/models", {}, JWT, { metadata: meta })).rejects.toBeInstanceOf(CailError);
   });
 
   it("V9 value object/array → throws", async () => {
     const { client } = wired(jsonOk({}));
     await expect(
-      client.call("/v1", {}, JWT, { metadata: { k: { nested: 1 } as unknown as string } }),
+      client.call("/models", {}, JWT, { metadata: { k: { nested: 1 } as unknown as string } }),
     ).rejects.toBeInstanceOf(CailError);
     await expect(
-      client.call("/v1", {}, JWT, { metadata: { k: [1, 2] as unknown as string } }),
+      client.call("/models", {}, JWT, { metadata: { k: [1, 2] as unknown as string } }),
     ).rejects.toBeInstanceOf(CailError);
   });
 
   it("V10 value >128 chars → throws", async () => {
     const { client } = wired(jsonOk({}));
     await expect(
-      client.call("/v1", {}, JWT, { metadata: { k: "a".repeat(129) } }),
+      client.call("/models", {}, JWT, { metadata: { k: "a".repeat(129) } }),
     ).rejects.toBeInstanceOf(CailError);
     // exactly 128 is accepted
     const { rec, client: c2 } = wired(jsonOk({}));
-    await c2.call("/v1", {}, JWT, { metadata: { k: "a".repeat(128) } });
+    await c2.call("/models", {}, JWT, { metadata: { k: "a".repeat(128) } });
     expect(rec.one.headers["x-cail-metadata"]).toBeDefined();
   });
 
@@ -211,7 +211,7 @@ describe("I3 — X-CAIL-Metadata validation", () => {
     const { client } = wired(jsonOk({}));
     for (const reserved of ["user_id", "app", "via"]) {
       await expect(
-        client.call("/v1", {}, JWT, { metadata: { [reserved]: "x" } }),
+        client.call("/models", {}, JWT, { metadata: { [reserved]: "x" } }),
       ).rejects.toBeInstanceOf(CailError);
     }
   });
@@ -220,7 +220,7 @@ describe("I3 — X-CAIL-Metadata validation", () => {
     const { rec, client } = wired(jsonOk({}));
     const err = await client
       .call(
-        "/v1",
+        "/models",
         {
           headers: {
             "X-CAIL-Metadata":
@@ -239,7 +239,7 @@ describe("I3 — X-CAIL-Metadata validation", () => {
     const { rec, client } = wired(jsonOk({}));
     const metadata = { ["constructor"]: "x" };
     const err = await client
-      .call("/v1", {}, JWT, { metadata })
+      .call("/models", {}, JWT, { metadata })
       .catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(err.code).toBe("invalid_metadata");
@@ -259,7 +259,7 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
     const { client } = wired(envelope(401, body), {
       onAuthRequired: () => {},
     });
-    const err = await client.call("/v1", {}, JWT).catch((e) => e);
+    const err = await client.call("/models", {}, JWT).catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(err.code).toBe("authentication_required");
     expect(err.status).toBe(401);
@@ -274,7 +274,7 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
       retry_after_seconds: 3600,
     };
     const { client } = wired(envelope(429, body, { "Retry-After": "3600" }));
-    const err = await client.call("/v1", {}, KEY).catch((e) => e);
+    const err = await client.call("/models", {}, KEY).catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(err.code).toBe("quota_exceeded");
     expect(err.status).toBe(429);
@@ -286,7 +286,7 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
     const { client } = wired(
       envelope(403, { error: "forbidden", message: "Missing entitlement.", missing_entitlement: "pro" }),
     );
-    const err = await client.call("/v1", {}, KEY).catch((e) => e);
+    const err = await client.call("/models", {}, KEY).catch((e) => e);
     expect(err.code).toBe("forbidden");
     expect(err.status).toBe(403);
     expect(err.extras["missing_entitlement"]).toBe("pro");
@@ -308,7 +308,7 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
       envelope(502, { error: "upstream_auth_error", message: "Contact ailab@gc.cuny.edu." }),
       { maxRetries: 0 },
     );
-    const err = await client.call("/v1", {}, KEY).catch((e) => e);
+    const err = await client.call("/models", {}, KEY).catch((e) => e);
     expect(err.code).toBe("upstream_auth_error");
     expect(err.status).toBe(502);
   });
@@ -318,7 +318,7 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
       envelope(503, { error: "sso_unavailable", message: "SSO is temporarily down." }),
       { maxRetries: 0 },
     );
-    const err = await client.call("/v1", {}, JWT).catch((e) => e);
+    const err = await client.call("/models", {}, JWT).catch((e) => e);
     expect(err.code).toBe("sso_unavailable");
     expect(err.status).toBe(503);
   });
@@ -327,7 +327,7 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
     const { client } = wired(nonJson(500, "<html>Internal Server Error</html>"), {
       maxRetries: 0,
     });
-    const err = await client.call("/v1", {}, KEY).catch((e) => e);
+    const err = await client.call("/models", {}, KEY).catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(err.code).toBe("unknown_error");
     expect(err.status).toBe(500);
@@ -339,7 +339,7 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
     const { client } = wired(nonJson(503, "busy", { "Retry-After": "7" }), {
       maxRetries: 0,
     });
-    const err = await client.call("/v1", {}, KEY).catch((e) => e);
+    const err = await client.call("/models", {}, KEY).catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(err.code).toBe("unknown_error");
     expect(err.status).toBe(503);
@@ -349,7 +349,7 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
   it("V19 message is byte-identical to the envelope's message (no rewording)", async () => {
     const exact = "Précisely thîs — verbatim, incl. 中文 & symbols: <>&\"'.";
     const { client } = wired(envelope(400, { error: "bad_request", message: exact }));
-    const err = await client.call("/v1", {}, KEY).catch((e) => e);
+    const err = await client.call("/models", {}, KEY).catch((e) => e);
     expect(err.message).toBe(exact);
   });
 });
@@ -371,7 +371,7 @@ describe("I5 — retry policy", () => {
       fetchImpl,
     });
 
-    await client.call("/v1", { redirect: "follow" }, JWT);
+    await client.call("/models", { redirect: "follow" }, JWT);
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(rec.captured).toHaveLength(1);
@@ -384,7 +384,7 @@ describe("I5 — retry policy", () => {
     });
     const { rec, client } = wired(redirect);
 
-    const err = await client.call("/v1", {}, JWT).catch((e) => e);
+    const err = await client.call("/models", {}, JWT).catch((e) => e);
 
     expect(err).toBeInstanceOf(CailError);
     expect(err.code).toBe("unexpected_redirect");
@@ -397,14 +397,14 @@ describe("I5 — retry policy", () => {
       envelope(500, { error: "server_error", message: "oops" }),
       jsonOk({ ok: true }),
     ]);
-    const resp = await client.call("/v1", { method: "POST" }, KEY);
+    const resp = await client.call("/models", { method: "POST" }, KEY);
     expect(resp.status).toBe(200);
     expect(rec.captured).toHaveLength(2);
   });
 
   it("V21 network-error then 200 → retries", async () => {
     const { rec, client } = wired([{ networkError: true }, jsonOk({ ok: true })]);
-    const resp = await client.call("/v1", { method: "POST" }, KEY);
+    const resp = await client.call("/models", { method: "POST" }, KEY);
     expect(resp.status).toBe(200);
     expect(rec.captured).toHaveLength(2);
   });
@@ -414,7 +414,7 @@ describe("I5 — retry policy", () => {
       envelope(400, { error: "bad_request", message: "bad" }),
       jsonOk({ ok: true }), // must never be reached
     ]);
-    await expect(client.call("/v1", {}, KEY)).rejects.toBeInstanceOf(CailError);
+    await expect(client.call("/models", {}, KEY)).rejects.toBeInstanceOf(CailError);
     expect(rec.captured).toHaveLength(1);
   });
 
@@ -423,7 +423,7 @@ describe("I5 — retry policy", () => {
       envelope(429, { error: "quota_exceeded", message: "budget" }),
       jsonOk({ ok: true }),
     ]);
-    await expect(client.call("/v1", {}, KEY)).rejects.toBeInstanceOf(CailError);
+    await expect(client.call("/models", {}, KEY)).rejects.toBeInstanceOf(CailError);
     expect(rec.captured).toHaveLength(1);
   });
 
@@ -432,7 +432,7 @@ describe("I5 — retry policy", () => {
       envelope(500, { error: "server_error", message: "still down" }),
       { maxRetries: 2 },
     );
-    const err = await client.call("/v1", {}, KEY).catch((e) => e);
+    const err = await client.call("/models", {}, KEY).catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(rec.captured).toHaveLength(3); // 1 + 2 retries
   });
@@ -443,7 +443,7 @@ describe("I5 — retry policy", () => {
       { maxRetries: Infinity },
     );
 
-    const err = await client.call("/v1", {}, KEY).catch((e) => e);
+    const err = await client.call("/models", {}, KEY).catch((e) => e);
 
     expect(err).toBeInstanceOf(CailError);
     expect(rec.captured).toHaveLength(3);
@@ -455,7 +455,7 @@ describe("I5 — retry policy", () => {
     const abortErr = new DOMException("stop", "AbortError");
     const started = Date.now();
     const pending = client
-      .call("/v1", { signal: ac.signal }, KEY)
+      .call("/models", { signal: ac.signal }, KEY)
       .catch((e) => e);
 
     setTimeout(() => ac.abort(abortErr), 10);
@@ -477,7 +477,7 @@ describe("I5 — retry policy", () => {
     const abortErr = new DOMException("stop", "AbortError");
     const started = Date.now();
     const pending = client
-      .call("/v1", { signal: ac.signal }, KEY)
+      .call("/models", { signal: ac.signal }, KEY)
       .catch((e) => e);
 
     setTimeout(() => ac.abort(abortErr), 10);
@@ -496,7 +496,7 @@ describe("I5 — retry policy", () => {
       jsonOk({ ok: true }),
     ]);
     const err = await client
-      .call("/v1", { method: "POST", body: readableBody() }, KEY)
+      .call("/models", { method: "POST", body: readableBody() }, KEY)
       .catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(err.code).toBe("server_error");
@@ -507,7 +507,7 @@ describe("I5 — retry policy", () => {
   it("V28b ReadableStream body + network error → no retry, network_error", async () => {
     const { rec, client } = wired([{ networkError: true }, jsonOk({ ok: true })]);
     const err = await client
-      .call("/v1", { method: "POST", body: readableBody() }, KEY)
+      .call("/models", { method: "POST", body: readableBody() }, KEY)
       .catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(err.code).toBe("network_error");
@@ -524,7 +524,7 @@ describe("I5 — retry policy", () => {
       jsonOk({ ok: true }),
     ]);
     const started = Date.now();
-    const resp = await client.call("/v1", {}, KEY);
+    const resp = await client.call("/models", {}, KEY);
     const elapsed = Date.now() - started;
     expect(resp.status).toBe(200);
     expect(rec.captured).toHaveLength(2);
@@ -539,7 +539,7 @@ describe("I6 — 401 hook", () => {
     const spy = vi.fn();
     const body = { error: "authentication_required", message: "sign in", login_url: "/login" };
     const { client } = wired(envelope(401, body), { onAuthRequired: spy });
-    const err = await client.call("/v1", {}, JWT).catch((e) => e);
+    const err = await client.call("/models", {}, JWT).catch((e) => e);
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy).toHaveBeenCalledWith(err);
     expect(err).toBeInstanceOf(CailError);
@@ -551,7 +551,7 @@ describe("I6 — 401 hook", () => {
       envelope(401, { error: "invalid_api_key", message: "bad key" }),
       { onAuthRequired: spy },
     );
-    await client.call("/v1", {}, KEY).catch(() => {});
+    await client.call("/models", {}, KEY).catch(() => {});
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -598,7 +598,7 @@ describe("I6 — 401 hook", () => {
         },
       },
     );
-    const err = await client.call("/v1", {}, JWT).catch((e) => e);
+    const err = await client.call("/models", {}, JWT).catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(err.code).toBe("authentication_required");
     expect(err.message).toBe("sign in");
@@ -614,7 +614,7 @@ describe("I6 — 401 hook", () => {
       }),
       { onAuthRequired: spy },
     );
-    const err = await client.call("/v1", {}, JWT).catch((e) => e);
+    const err = await client.call("/models", {}, JWT).catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(err.code).toBe("unknown_error");
     expect(err.status).toBe(401);
@@ -626,7 +626,7 @@ describe("I7 — 2xx passthrough, streams intact", () => {
   it("V25 200 SSE stream body returned by reference, first chunk readable before close (not buffered)", async () => {
     const stream = sseStream(["data: one\n\n", "data: two\n\n"], 30);
     const { client } = wired(stream);
-    const resp = await client.call("/v1", { method: "POST" }, KEY);
+    const resp = await client.call("/models", { method: "POST" }, KEY);
     // Same Response object by reference (I7).
     expect(resp).toBe(stream);
     expect(resp.body).not.toBeNull();
@@ -642,28 +642,54 @@ describe("I7 — 2xx passthrough, streams intact", () => {
   });
 });
 
-describe("I8 — body + model ref untouched", () => {
-  it("V26 init.body and model id are byte-identical on the wire", async () => {
-    const payload = JSON.stringify({
-      model: "@cf/zai-org/glm-5.2",
-      messages: [{ role: "user", content: "hi" }],
-    });
+describe("I8 — canonical model run", () => {
+  it("V26 POSTs exactly {model,input} to /v1/run", async () => {
+    const request = {
+      model: "@cf/example/text-model",
+      input: { messages: [{ role: "user", content: "hi" }] },
+      ignored: "not part of the wire contract",
+    };
     const { rec, client } = wired(jsonOk({ ok: true }));
-    await client.call(
-      "/v1/compat/chat/completions",
-      { method: "POST", body: payload, headers: { "content-type": "application/json" } },
-      JWT,
+    await client.run(request, JWT, { metadata: { purpose: "test" } });
+
+    expect(rec.one.url).toBe(`${BASE}/v1/run`);
+    expect(rec.one.method).toBe("POST");
+    expect(rec.one.headers["content-type"]).toBe("application/json");
+    expect(rec.one.headers["x-cail-app"]).toBe(APP);
+    expect(rec.one.headers["x-cail-metadata"]).toBe(
+      JSON.stringify({ purpose: "test" }),
     );
-    expect(rec.one.body).toBe(payload);
-    // The bare @cf/... id is present verbatim — never rewritten to workers-ai/.
-    expect(rec.one.body).toContain('"model":"@cf/zai-org/glm-5.2"');
-    expect(rec.one.body).not.toContain("workers-ai/");
+    expect(JSON.parse(rec.one.body)).toEqual({
+      model: request.model,
+      input: request.input,
+    });
   });
 
-  it("V26b URL is baseUrl + path (no double slash, path joined verbatim)", async () => {
+  it("V26b preserves the successful Response by reference", async () => {
+    const response = jsonOk({ response: "hello" });
+    const { client } = wired(response);
+    await expect(
+      client.run({ model: "@cf/example/text-model", input: "hi" }, KEY),
+    ).resolves.toBe(response);
+  });
+
+  it("V26c rejects malformed requests before fetch", async () => {
     const { rec, client } = wired(jsonOk({}));
-    await client.call("/v1/compat/chat/completions", {}, KEY);
-    expect(rec.one.url).toBe(`${BASE}/v1/compat/chat/completions`);
+    await expect(
+      client.run({ model: "", input: "hi" }, KEY),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
+    await expect(
+      client.run({ model: "@cf/example/text-model", input: undefined }, KEY),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
+    expect(rec.captured).toHaveLength(0);
+  });
+
+  it("V26d generic call() cannot invoke the model endpoint", async () => {
+    const { rec, client } = wired(jsonOk({}));
+    await expect(
+      client.call("/v1/run", { method: "POST" }, KEY),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
+    expect(rec.captured).toHaveLength(0);
   });
 });
 

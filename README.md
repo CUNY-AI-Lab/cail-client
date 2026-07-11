@@ -1,202 +1,133 @@
 # @cuny-ai-lab/cail-client
 
-Call the CAIL model proxy correctly. One wrapper that forwards exactly one
-credential, stamps the spend-attribution headers, and turns the backbone's
-error envelope into typed errors — so no tool re-derives the contract by hand
-and gets the subtle parts wrong.
+The shared Web-standard client for the CAIL gateway. It sends exactly one CAIL
+credential, stamps spend-attribution headers, preserves quota information, and
+turns gateway error envelopes into typed errors.
 
-The **consumer-side twin** of
-[`@cuny-ai-lab/cail-identity`](https://github.com/CUNY-AI-Lab/cail-identity)
-(the server-side verifier). This one *sends* a credential; that one *checks*
-one. They share no code and version independently.
-
-Pure Web-standard `fetch`/`Request`/`Response` — the same source runs unchanged
-in the **browser**, **Cloudflare Workers**, and **Node ≥20**. No SDK
-dependencies. The secret/token is always yours, passed per call.
-
-## Who needs this
-
-Anything that *makes model calls* through the proxy — Site Studio, Agent Studio,
-Kale Workbench, a tool frontend, or a Kale-deployed student project. The
-backbone itself (the model proxy, the key service) does **not** need this: it
-*is* the API being called. If you only *verify* an inbound identity token and
-never call the proxy, you want `@cuny-ai-lab/cail-identity` instead.
-
-The single hardest thing to get right by hand — and the reason this exists — is
-credential forwarding: the proxy is JWT-first-strict, so when you send the
-session JWT you must send *exactly* that and strip any `Authorization` header
-your model SDK quietly added (the "dummy bearer" footgun). This library does it
-for you.
+It runs in browsers, Workers, and Node 20 or newer with no runtime dependencies.
 
 ## Install
 
-Consumed as a public git dependency. The package commits its build output, so
-it resolves with no build step:
+The package is consumed from its public Git repository. Build output is
+committed, so consumers do not need to build it during installation.
 
 ```bash
 bun add github:CUNY-AI-Lab/cail-client
-# or
-npm install github:CUNY-AI-Lab/cail-client
 ```
 
-Pin to a tag or commit for reproducibility, e.g.
-`github:CUNY-AI-Lab/cail-client#v1.0.0`.
+Pin a tag or commit for reproducibility, for example
+`github:CUNY-AI-Lab/cail-client#v1.1.0`.
 
-> Not on GitHub Packages (can't host public packages, needs a `write:packages`
-> token). The public git-dep above is the supported path.
+## Run a model
 
-## Quick start
-
-### Browser tool behind the SSO gate (JWT path)
-
-Forward the gate-injected identity JWT. Any `Authorization` your SDK emits is
-stripped for you.
+`run()` is the model API. It always sends `POST {baseUrl}/v1/run` with a JSON
+body containing exactly `{ model, input }`.
 
 ```ts
-import { createCailClient, CailError } from "@cuny-ai-lab/cail-client";
+import { CailError, createCailClient } from "@cuny-ai-lab/cail-client";
 
 const cail = createCailClient({
-  baseUrl: CAIL_API_BASE,   // e.g. https://api.ailab.gc.cuny.edu
-  app: "alt-text",          // your stable, low-cardinality tool slug
-  // onAuthRequired defaults to a same-origin login redirect in the browser.
+  baseUrl: CAIL_API_BASE,
+  app: "alt-text",
 });
 
 try {
-  const res = await cail.call(
-    "/v1/compat/chat/completions",
+  const response = await cail.run(
     {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: "@cf/zai-org/glm-5.2",   // bare @cf/... id — forwarded verbatim
+      model: selectedModel,
+      input: {
         messages: [{ role: "user", content: "Describe this image." }],
-      }),
+      },
     },
     { kind: "jwt", token: identityJwt },
-    { metadata: { purpose: "alt-text" } }, // optional spend dimensions
+    { metadata: { purpose: "alt-text" } },
   );
-  const data = await res.json();
-} catch (err) {
-  if (err instanceof CailError) showToast(err.message); // shown as-is; do not reword
+
+  const result = await response.json();
+} catch (error) {
+  if (error instanceof CailError) showMessage(error.message);
 }
 ```
 
-### Server / Worker with a personal or delegated key (key path)
+For server or background work, pass a personal or delegated CAIL key:
 
 ```ts
-const cail = createCailClient({ baseUrl: CAIL_API_BASE, app: "kale-project" });
-
-const res = await cail.call(
-  "/v1/compat/chat/completions",
-  { method: "POST", headers: { "content-type": "application/json" }, body },
-  { kind: "key", token: env.CAIL_DELEGATED_KEY },  // sk-cail-…
-  { metadata: { project: projectId } },            // per-project spend drill-down
+const response = await cail.run(
+  { model: selectedModel, input },
+  { kind: "key", token: env.CAIL_DELEGATED_KEY },
+  { metadata: { project: projectId } },
 );
 ```
 
-### Streaming (SSE)
+The successful `Response` is returned by reference. Use
+`parseQuotaHeaders(response.headers)` to read advisory quota headers without
+buffering or changing the response body.
 
-The 2xx `Response` is returned by reference and never buffered — stream directly:
+## Other gateway endpoints
 
-```ts
-const res = await cail.call("/v1/compat/chat/completions", {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({ model, messages, stream: true }),
-}, credential);
-
-const reader = res.body!.getReader();
-// … read chunks as they arrive …
-```
-
-### Error handling
-
-Every backbone error is a `CailError { code, message, status, extras }`. Show
-`message` as-is; branch on `code`/`status` for behavior. **4xx are never
-retried.**
+`call()` remains available for non-model gateway endpoints such as `/models`
+and key delegation. Do not use it for model invocation.
 
 ```ts
-try {
-  await cail.call(path, init, credential);
-} catch (err) {
-  if (err instanceof CailError) {
-    switch (err.code) {
-      case "quota_exceeded":   // 429 — err.extras.retry_after_seconds
-      case "invalid_api_key":  // 401 — link to /api-keys/
-      case "forbidden":        // 403 — err.extras.missing_entitlement
-      default:                 // unknown_error / network_error included
-        showMessage(err.message);
-    }
-  }
-}
+const response = await cail.call(
+  "/models",
+  { method: "GET" },
+  credential,
+);
 ```
 
-### Reading quota
-
-Model-call responses may carry advisory quota headers. Read them from any 2xx
-`Response` with `parseQuotaHeaders(response.headers)`; it returns `null` when
-the meter is unavailable.
-
-```ts
-import { parseQuotaHeaders } from "@cuny-ai-lab/cail-client";
-
-const res = await cail.call(path, init, credential);
-const quota = parseQuotaHeaders(res.headers);
-```
-
-For an explicit snapshot, call `GET /quota` through the client:
+For an explicit quota snapshot:
 
 ```ts
 const quota = await cail.getQuota(credential);
 ```
 
-The producer contract is `cail-gateway` `docs/QUOTA_SURFACE.md`.
+## Authentication and headers
 
-## The contract — 9 invariants
+The client enforces these wire rules:
 
-`createCailClient({ baseUrl, app, onAuthRequired?, fetchImpl?, maxRetries? })`
-returns `{ call(path, init, credential, options?), getQuota(credential) }`.
-`call()` returns the 2xx `Response` **by reference** and **throws** a
-`CailError` on any backbone error. Loosening or removing any invariant is a
-**major** semver bump.
+- `{ kind: "jwt" }` sends `X-CAIL-Identity-JWT` and removes `Authorization`.
+- `{ kind: "key" }` sends `Authorization: Bearer <key>` and removes the JWT
+  header.
+- `X-CAIL-App` is always the validated app slug supplied at construction.
+- Optional `X-CAIL-Metadata` accepts at most eight string or finite-number
+  values. Reserved identity and prototype-pollution keys are rejected.
 
-| # | Invariant | The client guarantees |
-|---|-----------|-----------------------|
-| **I1** | Exactly one credential on the wire | `kind:"jwt"` → sets `X-CAIL-Identity-JWT` **and deletes any `Authorization`** the caller/SDK injected (dummy-bearer strip; the proxy is JWT-first-strict). `kind:"key"` → `Authorization: Bearer <token>`, **no** JWT header. Never both. Tokens must be non-empty and contain no control characters. |
-| **I2** | `X-CAIL-App` always sent | Equals the constructed `app`; the caller can't override it. The slug is validated against `/^[a-z0-9][a-z0-9-]{0,63}$/` — **invalid → throws at construction**. |
-| **I3** | `X-CAIL-Metadata` validated | Optional per call: ≤8 keys, `string`\|`number` values, string values ≤128 chars, reserved keys (`user_id`, `app`, `via`) and pollution keys (`__proto__`, `constructor`, `prototype`) rejected. Violations **throw**; valid metadata is serialized as JSON. |
-| **I4** | Error envelope → typed error, message verbatim | Non-2xx → `CailError{code, message, status, extras}` only when both `error` and `message` are strings; `message` passed through **unmodified**. Non-JSON or malformed error body → `CailError{code:"unknown_error"}` — **never swallowed as success**. `Retry-After` is preserved as `extras.retry_after` when present. |
-| **I5** | Retry policy | **Never** retries 4xx, aborts, or one-shot `ReadableStream` request bodies. Retries 5xx + network up to `maxRetries` (default 2) with exponential backoff; integer `Retry-After` seconds on 5xx are honored up to a 10s cap. |
-| **I6** | 401 hook | `401 authentication_required` → invokes `onAuthRequired(err)`, then **still throws** the original `CailError` even if the hook throws. Browser default: same-origin redirect to `err.extras.login_url` or `/login?rt=<path>`. |
-| **I7** | 2xx passthrough, streams intact | Success `Response` returned **by reference** — body not buffered, so SSE streams pass through. |
-| **I8** | Body + model untouched | `init.body` forwarded verbatim; the client does **not** rewrite the `model` id (the proxy adds the `workers-ai/` prefix on compat routes). |
-| **I9** | Quota headers are advisory | `parseQuotaHeaders(headers)` only returns a quota meter when all six `X-CAIL-Quota-*` headers are present and valid. Missing, malformed, negative, unsafe, or unknown-state members return `null` — **never** a partial meter and never an error. |
+Tokens must be non-empty and contain no control characters.
+
+## Errors and retries
+
+Non-success responses throw `CailError { code, message, status, extras }`.
+Gateway error messages are preserved verbatim. The client never retries 4xx,
+aborted requests, or requests with one-shot stream bodies. It retries network
+and 5xx failures up to `maxRetries` (default 2).
+
+A `401 authentication_required` response invokes `onAuthRequired` and still
+throws the original error. In a browser, the default hook performs a guarded
+same-origin login redirect.
 
 ## API
 
-- `createCailClient(opts): CailClient` — validates the `app` slug at construction.
-- `CailClient.call(path, init, credential, options?): Promise<Response>` — 2xx by
-  reference; throws `CailError` otherwise.
-- `CailClient.getQuota(credential): Promise<CailQuotaSnapshot>` — reads
-  `GET /quota`; throws `CailError` on non-2xx or malformed 2xx quota bodies.
-- `class CailError extends Error` — `{ code, message, status, extras }`.
-- `parseCailError(response): Promise<CailError>` — standalone envelope parser (I4).
-- `parseQuotaHeaders(headers): CailQuota | null` — standalone all-or-none
-  parser for advisory quota response headers (I9).
-- `browserAuthRedirect(err)` — the default browser 401 hook (same-origin-guarded).
+- `createCailClient(options): CailClient`
+- `CailClient.run(request, credential, options?): Promise<Response>`
+- `CailClient.call(path, init, credential, options?): Promise<Response>` for
+  non-model endpoints
+- `CailClient.getQuota(credential): Promise<CailQuotaSnapshot>`
+- `parseQuotaHeaders(headers): CailQuota | null`
+- `parseCailError(response): Promise<CailError>`
+- `browserAuthRedirect(error): void`
 
 ## Development
 
 ```bash
-npm install
-npm run typecheck   # tsc, source + tests
-npm run build       # emit dist/ (committed, so git-deps resolve)
-npm test            # the contract vectors (vitest)
+bun install
+bun run typecheck
+bun run build
+bun test
 ```
 
-The test suite injects a **recording mock** `fetch` that captures the outgoing
-request and asserts every invariant on the **captured wire**, not the client's
-internals — the contract is validated independently of the implementation.
+The tests use a recording fetch mock to assert outgoing URLs, headers, methods,
+and bodies at the wire boundary.
 
 ## License
 

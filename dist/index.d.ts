@@ -19,8 +19,8 @@
  *   - Never retry 4xx; retry 5xx + network up to `maxRetries` with backoff (I5).
  *   - `401 authentication_required` invokes `onAuthRequired`, then still throws
  *     (I6).
- *   - 2xx `Response` returned by reference, body NOT buffered (SSE passthrough,
- *     I7); `init.body` and the `model` id forwarded verbatim (I8).
+ *   - 2xx `Response` returned by reference, body NOT buffered (I7).
+ *   - `run()` owns the canonical `POST /v1/run` `{model,input}` contract (I8).
  *   - Quota headers are advisory and all-or-none: absent/malformed quota
  *     headers mean "meter unavailable", never a client error (I9).
  *
@@ -86,13 +86,23 @@ export interface CailCallOptions {
     /** Per-call spend metadata (I3), merged over any `X-CAIL-Metadata` already in `init.headers`. */
     metadata?: CailMetadata;
 }
+/** The canonical model request accepted by `POST /v1/run`. */
+export interface CailRunRequest {
+    model: string;
+    input: unknown;
+}
 export interface CailClient {
     /**
-     * Call the proxy. Returns the 2xx `Response` by reference (body NOT buffered,
-     * I7). Throws {@link CailError} on any non-2xx response or transport failure.
+     * Run a model through the canonical `POST /v1/run` endpoint. The request
+     * body is serialized as exactly `{ model, input }`.
+     */
+    run(request: CailRunRequest, credential: CailCredential, options?: CailCallOptions): Promise<Response>;
+    /**
+     * Call a non-model gateway endpoint such as `/models`, `/quota`, or key
+     * delegation. Model invocation belongs in {@link run}.
      *
-     * @param path   e.g. `/v1/compat/chat/completions` (joined onto `baseUrl`).
-     * @param init   method / body / headers; `body` and `model` forwarded verbatim (I8).
+     * @param path   joined onto `baseUrl`.
+     * @param init   method, body, and headers for the gateway endpoint.
      * @param credential  the single credential to forward (I1).
      * @param options  optional per-call metadata (I3).
      */

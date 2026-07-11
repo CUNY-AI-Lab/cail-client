@@ -19,8 +19,8 @@
  *   - Never retry 4xx; retry 5xx + network up to `maxRetries` with backoff (I5).
  *   - `401 authentication_required` invokes `onAuthRequired`, then still throws
  *     (I6).
- *   - 2xx `Response` returned by reference, body NOT buffered (SSE passthrough,
- *     I7); `init.body` and the `model` id forwarded verbatim (I8).
+ *   - 2xx `Response` returned by reference, body NOT buffered (I7).
+ *   - `run()` owns the canonical `POST /v1/run` `{model,input}` contract (I8).
  *   - Quota headers are advisory and all-or-none: absent/malformed quota
  *     headers mean "meter unavailable", never a client error (I9).
  *
@@ -542,5 +542,27 @@ export function createCailClient(opts) {
         }
         return parseQuotaSnapshotBody(body, response.status);
     }
-    return { call, getQuota };
+    async function run(request, credential, options) {
+        if (typeof request !== "object" ||
+            request === null ||
+            typeof request.model !== "string" ||
+            request.model.length === 0 ||
+            !("input" in request) ||
+            request.input === undefined) {
+            throw new CailError("invalid_request", "run() requires { model: string, input }.", 0);
+        }
+        let body;
+        try {
+            body = JSON.stringify({ model: request.model, input: request.input });
+        }
+        catch {
+            throw new CailError("invalid_request", "run() input must be JSON-serializable.", 0);
+        }
+        return call("/v1/run", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body,
+        }, credential, options);
+    }
+    return { run, call, getQuota };
 }
