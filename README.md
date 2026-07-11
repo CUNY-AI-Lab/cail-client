@@ -114,6 +114,15 @@ redirects still throw (the identity JWT never follows a redirect), and the
 `POST {baseUrl}/v1/chat/completions` — any other URL throws, which catches
 SDK base-URL misconfiguration loudly.
 
+One deliberate carve-out: a `429 quota_exceeded` envelope **throws the
+`CailError`** instead of returning the response. AI SDKs treat any 429 as
+retryable, but a CAIL quota 429 resets on a budget window — retrying only
+burns attempts and then buries the envelope inside the SDK's `RetryError`.
+The thrown `CailError` is not a type any SDK retries, so the verbatim quota
+message (with `extras.retry_after_seconds`) surfaces on the first failure.
+Catch it (or `instanceof CailError` in your SDK `onError`) to show the user
+their quota state.
+
 ## Other gateway endpoints
 
 `call()` remains available for non-model gateway endpoints such as `/models`

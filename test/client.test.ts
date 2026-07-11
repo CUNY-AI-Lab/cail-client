@@ -816,15 +816,34 @@ describe("chatFetch — SDK adapter", () => {
     expect(rec.one.headers["x-cail-app"]).toBe(APP);
   });
 
-  it("V32 raw semantics: 429 returned (not thrown), exactly one wire call (no client retry)", async () => {
+  it("V32 quota carve-out: 429 quota_exceeded THROWS the CailError (never SDK-retried), one wire call", async () => {
     const { rec, client } = wired([
-      envelope(429, { error: "quota_exceeded", message: "over" }),
+      envelope(
+        429,
+        { error: "quota_exceeded", message: "over budget", retry_after_seconds: 120 },
+        { "retry-after": "120" },
+      ),
       jsonOk({ never: "reached" }),
     ]);
     const fetchLike = client.chatFetch(KEY);
-    const resp = await fetchLike(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] }));
+    await expect(
+      fetchLike(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] })),
+    ).rejects.toMatchObject({
+      code: "quota_exceeded",
+      status: 429,
+      message: "over budget",
+      extras: expect.objectContaining({ retry_after_seconds: 120 }),
+    });
+    expect(rec.captured).toHaveLength(1); // thrown on the FIRST failure — no retry storm
+  });
+
+  it("V32a non-quota 429 keeps raw semantics: returned, not thrown", async () => {
+    const { rec, client } = wired(
+      envelope(429, { error: "rate_limited", message: "slow down" }),
+    );
+    const resp = await client.chatFetch(KEY)(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] }));
     expect(resp.status).toBe(429);
-    expect(((await resp.json()) as { error: string }).error).toBe("quota_exceeded");
+    expect(((await resp.json()) as { error: string }).error).toBe("rate_limited"); // body intact
     expect(rec.captured).toHaveLength(1);
   });
 

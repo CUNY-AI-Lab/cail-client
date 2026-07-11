@@ -797,6 +797,14 @@ export function createCailClient(opts: CailClientOptions): CailClient {
       // provider error bodies and owns retry/backoff. The 401 hook (I6) still
       // fires so browser tools can bounce to login; it inspects a CLONE so the
       // body the SDK reads stays intact.
+      //
+      // ONE carve-out: a 429 `quota_exceeded` envelope THROWS the CailError
+      // instead. AI SDKs treat any 429 Response as retryable, but a CAIL quota
+      // 429 resets on a budget window, not a rate blip — retrying it can only
+      // burn attempts and then bury the envelope inside the SDK's RetryError
+      // (the fleet's known quota-surfacing bug). A thrown CailError is not a
+      // type any SDK retries, so the verbatim quota message (with
+      // extras.retry_after_seconds) surfaces on the first failure.
       if (internal?.raw === true) {
         if (response.status === 401 && onAuthRequired) {
           try {
@@ -805,6 +813,15 @@ export function createCailClient(opts: CailClientOptions): CailClient {
           } catch {
             // Advisory only; never mask the response.
           }
+        }
+        if (response.status === 429) {
+          let peek: CailError | null = null;
+          try {
+            peek = await parseCailError(response.clone());
+          } catch {
+            // Unreadable 429 body: return it raw.
+          }
+          if (peek?.code === "quota_exceeded") throw peek;
         }
         return response;
       }
