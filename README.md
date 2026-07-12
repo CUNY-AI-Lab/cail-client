@@ -172,11 +172,19 @@ messages are preserved verbatim.
 Each buffered `run()` call
 generates one UUID v4 `Idempotency-Key` before its retry loop and reuses it for
 every attempt, allowing safe network and 5xx retries through the gateway's
-durable claim/replay contract. Streaming `chatCompletions()` calls are never
+durable claim/replay contract; callers may supply their own key via
+`options.idempotencyKey` to deduplicate one logical run across their own
+restarts. Streaming `chatCompletions()` calls are never
 retried by this client. The client also never retries 4xx, aborted requests, or
-requests with one-shot stream bodies. Eligible calls retry network and 5xx
+requests with one-shot stream bodies. Generic `call()` requests using a
+non-idempotent method (POST/PATCH) are retried only when an `Idempotency-Key`
+header travels with the request; idempotent methods (GET/HEAD/PUT/DELETE)
+remain eligible as before. Eligible calls retry network and 5xx
 failures up to `maxRetries` (default 2 when omitted), unless the gateway sets
-`x-should-retry: false`. A present but
+`x-should-retry: false`. Backoff is full-jitter exponential (a random delay
+between 0 and `min(2s, 200ms x 2^attempt)`); a `Retry-After` header in either
+delay-seconds or HTTP-date form is honored up to a 30s ceiling, and within
+that ceiling the client never retries earlier than the server asked. A present but
 invalid `maxRetries` — anything other than a finite integer >= 0 — throws
 `invalid_config` at construction; invalid config is never silently coerced.
 

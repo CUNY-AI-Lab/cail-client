@@ -105,8 +105,9 @@ export interface CailClientOptions {
     fetchImpl?: typeof fetch;
     /**
      * Max retries for eligible non-model and idempotency-keyed buffered model
-     * 5xx + network errors (I5). Default 2. Never applies to 4xx or streaming
-     * model POSTs. A PRESENT value
+     * 5xx + network errors (I5). Default 2. Never applies to 4xx, streaming
+     * model POSTs, or generic non-idempotent calls (POST/PATCH) that carry no
+     * `Idempotency-Key`. A PRESENT value
      * must be a finite integer >= 0 — anything else throws `invalid_config` at
      * construction (fail loud, matching `baseUrl`/`app`/`fetchImpl`; invalid
      * config is never silently coerced).
@@ -132,6 +133,17 @@ export interface CailRunRequest {
     model: string;
     input: unknown;
 }
+/** Options accepted by {@link CailClient.run} — the shared call options plus run-only knobs. */
+export interface CailRunOptions extends CailCallOptions {
+    /**
+     * Caller-supplied `Idempotency-Key` for the buffered run (IETF
+     * draft-ietf-httpapi-idempotency-key-header). Lets an app dedupe the SAME
+     * logical run across its own restarts/timeouts, beyond the per-call UUID
+     * the client mints by default. Must be 1–255 characters with no control
+     * characters; reused verbatim on every retry attempt.
+     */
+    idempotencyKey?: string;
+}
 /**
  * The OpenAI-compatible chat request accepted by `POST /v1/chat/completions`.
  * Extra OpenAI parameters (`temperature`, `max_tokens`, `tools`,
@@ -149,7 +161,7 @@ export interface CailClient {
      * Run a model through the canonical `POST /v1/run` endpoint. The request
      * body is serialized as exactly `{ model, input }`.
      */
-    run(request: CailRunRequest, credential: CailCredential, options?: CailCallOptions): Promise<Response>;
+    run(request: CailRunRequest, credential: CailCredential, options?: CailRunOptions): Promise<Response>;
     /**
      * Run an OpenAI-compatible chat call through `POST /v1/chat/completions`.
      * With `stream: true` the returned 2xx `Response` body is the live SSE

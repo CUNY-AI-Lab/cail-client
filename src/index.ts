@@ -137,8 +137,9 @@ export interface CailClientOptions {
   fetchImpl?: typeof fetch;
   /**
    * Max retries for eligible non-model and idempotency-keyed buffered model
-   * 5xx + network errors (I5). Default 2. Never applies to 4xx or streaming
-   * model POSTs. A PRESENT value
+   * 5xx + network errors (I5). Default 2. Never applies to 4xx, streaming
+   * model POSTs, or generic non-idempotent calls (POST/PATCH) that carry no
+   * `Idempotency-Key`. A PRESENT value
    * must be a finite integer >= 0 — anything else throws `invalid_config` at
    * construction (fail loud, matching `baseUrl`/`app`/`fetchImpl`; invalid
    * config is never silently coerced).
@@ -167,6 +168,18 @@ export interface CailRunRequest {
   input: unknown;
 }
 
+/** Options accepted by {@link CailClient.run} — the shared call options plus run-only knobs. */
+export interface CailRunOptions extends CailCallOptions {
+  /**
+   * Caller-supplied `Idempotency-Key` for the buffered run (IETF
+   * draft-ietf-httpapi-idempotency-key-header). Lets an app dedupe the SAME
+   * logical run across its own restarts/timeouts, beyond the per-call UUID
+   * the client mints by default. Must be 1–255 characters with no control
+   * characters; reused verbatim on every retry attempt.
+   */
+  idempotencyKey?: string;
+}
+
 /**
  * The OpenAI-compatible chat request accepted by `POST /v1/chat/completions`.
  * Extra OpenAI parameters (`temperature`, `max_tokens`, `tools`,
@@ -188,7 +201,7 @@ export interface CailClient {
   run(
     request: CailRunRequest,
     credential: CailCredential,
-    options?: CailCallOptions,
+    options?: CailRunOptions,
   ): Promise<Response>;
 
   /**
@@ -443,9 +456,50 @@ function isRetriableNetworkError(err: unknown): boolean {
   return !(err instanceof CailError);
 }
 
+/**
+ * HTTP methods that are idempotent by definition (RFC 9110 §9.2.2 / MDN):
+ * safe to retry without an idempotency key. POST and PATCH are NOT here —
+ * retrying them without an `Idempotency-Key` risks duplicate side effects
+ * (Stripe idempotent requests; IETF draft-ietf-httpapi-idempotency-key-header).
+ */
+const IDEMPOTENT_HTTP_METHODS = new Set([
+  "GET",
+  "HEAD",
+  "PUT",
+  "DELETE",
+  "OPTIONS",
+  "TRACE",
+]);
+
+/** Uniform random fraction in [0, 1) from Web Crypto (the client's RNG everywhere). */
+function randomFraction(): number {
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  return buf[0]! / 2 ** 32;
+}
+
+/**
+ * UUID v4 via `crypto.randomUUID` where available; otherwise built from
+ * `getRandomValues` — browsers expose `randomUUID` only in SECURE contexts,
+ * and `run()` must not throw a raw TypeError on plain-HTTP dev origins. Same
+ * fallback cail-log uses to mint request ids.
+ */
+function mintIdempotencyKey(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  b[6] = (b[6]! & 0x0f) | 0x40;
+  b[8] = (b[8]! & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
 function backoffDelayMs(attempt: number): number {
-  // attempt is 0-based for the first retry. Exponential base 200ms, capped.
-  return Math.min(200 * 2 ** attempt, 2000);
+  // attempt is 0-based for the first retry. FULL JITTER per the AWS Builders'
+  // Library ("Timeouts, retries, and backoff with jitter"):
+  // delay = random(0, min(cap, base·2^attempt)) — desynchronizes retrying
+  // clients so a shared outage doesn't produce a thundering herd.
+  return randomFraction() * Math.min(200 * 2 ** attempt, 2000);
 }
 
 function abortReason(signal: AbortSignal): unknown {
@@ -476,12 +530,31 @@ function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
   });
 }
 
+/**
+ * Ceiling on how long a server `Retry-After` hint can hold a retry. RFC 9110
+ * §10.2.3 lets the server ask for an arbitrary wait; we honor it up to 30s —
+ * three windows of the old 10s cap, still bounded for interactive tools (a
+ * hint longer than 30s is a "come back later" the caller should surface, not
+ * a delay worth silently sitting on; peer SDKs cap at 30–60s or drop the hint
+ * entirely). Hints at or under the ceiling are honored in full — the client
+ * never retries earlier than the server asked.
+ */
+const RETRY_AFTER_CAP_MS = 30_000;
+
 function retryDelayMs(response: Response, attempt: number): number {
   const backoff = backoffDelayMs(attempt);
   const retryAfter = response.headers.get("Retry-After");
-  if (retryAfter === null || !/^\d+$/.test(retryAfter)) return backoff;
-  const seconds = Number(retryAfter);
-  return Math.min(Math.max(backoff, seconds * 1000), 10_000);
+  if (retryAfter === null) return backoff;
+  // RFC 9110 §10.2.3: Retry-After = HTTP-date / delay-seconds.
+  let hintMs: number | null = null;
+  if (/^\d+$/.test(retryAfter)) {
+    hintMs = Number(retryAfter) * 1000;
+  } else {
+    const dateMs = Date.parse(retryAfter);
+    if (!Number.isNaN(dateMs)) hintMs = Math.max(0, dateMs - Date.now());
+  }
+  if (hintMs === null) return backoff; // malformed hint → jittered backoff
+  return Math.min(Math.max(backoff, hintMs), RETRY_AFTER_CAP_MS);
 }
 
 function shouldRetryHeader(response: Response): boolean | null {
@@ -682,6 +755,20 @@ export function createCailClient(opts: CailClientOptions): CailClient {
       0,
     );
   }
+  // Fail loud at construction on a garbage base URL (same posture as `app` /
+  // `maxRetries`): otherwise it only surfaces later, per call, disguised as a
+  // `network_error`.
+  try {
+    new URL(opts.baseUrl);
+  } catch {
+    throw new CailError(
+      "invalid_config",
+      `createCailClient requires an absolute \`baseUrl\` URL; ${JSON.stringify(
+        opts.baseUrl,
+      )} does not parse (new URL threw).`,
+      0,
+    );
+  }
   if (typeof opts.app !== "string" || !APP_SLUG_RE.test(opts.app)) {
     throw new CailError(
       "invalid_config",
@@ -857,6 +944,25 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     const signal = init.signal;
     const hasNonReplayableBody = isReadableStreamBody(init.body);
     const retry5xx = internal?.retry5xx !== false;
+
+    // Retry safety for the generic path: a non-idempotent method (POST/PATCH —
+    // MDN "Idempotent") is only retried when an `Idempotency-Key` travels with
+    // the request (caller-supplied here, or minted by run()), per Stripe's
+    // idempotent-requests contract and IETF
+    // draft-ietf-httpapi-idempotency-key-header. Without a key, a network/5xx
+    // retry of e.g. `POST /keys` could duplicate the side effect. Idempotent
+    // methods (GET/HEAD/PUT/DELETE) retry as before. The billed model paths
+    // keep their own stricter gate (`modelRun`/`idempotentModelRun`) below.
+    const method = (init.method ?? "GET").toUpperCase();
+    let wireIdempotencyKey: string | undefined;
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === "idempotency-key" && headers[key]!.length > 0) {
+        wireIdempotencyKey = headers[key];
+        break;
+      }
+    }
+    const retrySafeMethod =
+      IDEMPOTENT_HTTP_METHODS.has(method) || wireIdempotencyKey !== undefined;
     const requestInit: RequestInit = { ...init, headers, redirect: "manual" };
 
     let attempt = 0;
@@ -874,6 +980,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         // Network/transport error (I5): retry up to maxRetries, else throw.
         if (
           (internal?.modelRun !== true || internal?.idempotentModelRun === true) &&
+          retrySafeMethod &&
           !hasNonReplayableBody &&
           isRetriableNetworkError(err) &&
           attempt < maxRetries
@@ -979,6 +1086,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         is5xx &&
         shouldRetryHeader(response) !== false &&
         (internal?.modelRun !== true || internal?.idempotentModelRun === true) &&
+        retrySafeMethod &&
         retry5xx &&
         !hasNonReplayableBody &&
         attempt < maxRetries
@@ -1036,7 +1144,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
   async function run(
     request: CailRunRequest,
     credential: CailCredential,
-    options?: CailCallOptions,
+    options?: CailRunOptions,
   ): Promise<Response> {
     if (
       typeof request !== "object" ||
@@ -1049,6 +1157,20 @@ export function createCailClient(opts: CailClientOptions): CailClient {
       throw new CailError(
         "invalid_request",
         "run() requires { model: string, input }.",
+        0,
+      );
+    }
+
+    if (
+      options?.idempotencyKey !== undefined &&
+      (typeof options.idempotencyKey !== "string" ||
+        options.idempotencyKey.length === 0 ||
+        options.idempotencyKey.length > 255 ||
+        CREDENTIAL_CONTROL_CHAR_RE.test(options.idempotencyKey))
+    ) {
+      throw new CailError(
+        "invalid_request",
+        "run() options.idempotencyKey must be a 1-255 character string with no control characters.",
         0,
       );
     }
@@ -1070,7 +1192,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "Idempotency-Key": crypto.randomUUID(),
+          "Idempotency-Key": options?.idempotencyKey ?? mintIdempotencyKey(),
         },
         body,
       },

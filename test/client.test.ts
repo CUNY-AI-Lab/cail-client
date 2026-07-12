@@ -618,8 +618,15 @@ describe("I5 — retry policy", () => {
   });
 
   it("V27b abort during 5xx backoff rejects promptly and does not issue retry", async () => {
+    // Retry-After: 1 pins the backoff sleep at >= 1s so the 10ms abort is
+    // guaranteed to land mid-backoff (the jittered backoff alone can be
+    // arbitrarily short).
     const { rec, client } = wired([
-      envelope(500, { error: "server_error", message: "try later" }),
+      envelope(
+        500,
+        { error: "server_error", message: "try later" },
+        { "Retry-After": "1" },
+      ),
       jsonOk({ ok: true }),
     ]);
     const ac = new AbortController();
@@ -1049,6 +1056,308 @@ describe("chatFetch — SDK adapter", () => {
     await expect(
       client.chatFetch(JWT)(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] })),
     ).rejects.toMatchObject({ code: "unexpected_redirect" });
+  });
+});
+
+// ── Retry safety: non-idempotent generic calls (MDN idempotent methods; ──
+// Stripe idempotent requests; IETF draft-ietf-httpapi-idempotency-key-header)
+
+describe("I5 extension — generic call() never auto-retries a keyless non-idempotent method", () => {
+  it("POST without Idempotency-Key is NOT retried on 5xx (one wire call, typed error)", async () => {
+    const { rec, client } = wired([
+      envelope(500, { error: "server_error", message: "oops" }),
+      jsonOk({ never: "reached" }),
+    ]);
+    await expect(
+      client.call("/keys", { method: "POST" }, JWT),
+    ).rejects.toMatchObject({ code: "server_error", status: 500 });
+    expect(rec.captured).toHaveLength(1);
+  });
+
+  it("POST without Idempotency-Key is NOT retried on network error", async () => {
+    const { rec, client } = wired([{ networkError: true }, jsonOk({})]);
+    await expect(
+      client.call("/keys", { method: "POST" }, JWT),
+    ).rejects.toMatchObject({ code: "network_error", status: 0 });
+    expect(rec.captured).toHaveLength(1);
+  });
+
+  it("PATCH without Idempotency-Key is NOT retried on 5xx", async () => {
+    const { rec, client } = wired([
+      envelope(500, { error: "server_error", message: "oops" }),
+      jsonOk({}),
+    ]);
+    await expect(
+      client.call("/keys/k1", { method: "PATCH" }, JWT),
+    ).rejects.toMatchObject({ code: "server_error" });
+    expect(rec.captured).toHaveLength(1);
+  });
+
+  it("POST WITH a caller-supplied Idempotency-Key IS retried, same key on every attempt", async () => {
+    const { rec, client } = wired([
+      envelope(500, { error: "server_error", message: "oops" }),
+      jsonOk({ ok: true }),
+    ]);
+    const resp = await client.call(
+      "/keys",
+      { method: "POST", headers: { "Idempotency-Key": "caller-key-1" } },
+      JWT,
+    );
+    expect(resp.status).toBe(200);
+    expect(rec.captured).toHaveLength(2);
+    expect(rec.captured[0]!.headers["idempotency-key"]).toBe("caller-key-1");
+    expect(rec.captured[1]!.headers["idempotency-key"]).toBe("caller-key-1");
+  });
+
+  it("POST with a caller key retries network errors too", async () => {
+    const { rec, client } = wired([{ networkError: true }, jsonOk({ ok: true })]);
+    const resp = await client.call(
+      "/keys",
+      { method: "POST", headers: { "idempotency-key": "caller-key-2" } },
+      JWT,
+    );
+    expect(resp.status).toBe(200);
+    expect(rec.captured).toHaveLength(2);
+  });
+
+  it("idempotent methods (GET / DELETE) still retry without a key", async () => {
+    {
+      const { rec, client } = wired([
+        envelope(500, { error: "server_error", message: "oops" }),
+        jsonOk({ ok: true }),
+      ]);
+      const resp = await client.call("/v1/models", { method: "GET" }, KEY);
+      expect(resp.status).toBe(200);
+      expect(rec.captured).toHaveLength(2);
+    }
+    {
+      const { rec, client } = wired([
+        envelope(500, { error: "server_error", message: "oops" }),
+        jsonOk({ ok: true }),
+      ]);
+      const resp = await client.call("/keys/k1", { method: "DELETE" }, JWT);
+      expect(resp.status).toBe(200);
+      expect(rec.captured).toHaveLength(2);
+    }
+  });
+});
+
+// ── Backoff jitter + RFC 9110 Retry-After ─────────────────────────────────
+
+describe("backoff — full jitter (AWS Builders' Library) and RFC 9110 Retry-After", () => {
+  it("first-retry backoff is within the full-jitter bound [0, 200ms]", async () => {
+    vi.useFakeTimers();
+    try {
+      const { rec, client } = wired([
+        envelope(500, { error: "server_error", message: "oops" }),
+        jsonOk({ ok: true }),
+      ]);
+      const pending = client.call("/v1/models", { method: "GET" }, KEY);
+      // Full jitter: delay = random(0, min(2000, 200·2^0)) — advancing the
+      // clock by exactly the 200ms upper bound must release the retry.
+      await vi.advanceTimersByTimeAsync(200);
+      const resp = await pending;
+      expect(resp.status).toBe(200);
+      expect(rec.captured).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Retry-After HTTP-date form is honored (RFC 9110 §10.2.3)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    try {
+      const { rec, client } = wired([
+        envelope(
+          503,
+          { error: "server_busy", message: "try later" },
+          { "Retry-After": new Date(Date.now() + 5000).toUTCString() },
+        ),
+        jsonOk({ ok: true }),
+      ]);
+      const pending = client.call("/v1/models", { method: "GET" }, KEY);
+      await vi.advanceTimersByTimeAsync(4500);
+      expect(rec.captured).toHaveLength(1); // still waiting at 4.5s
+      await vi.advanceTimersByTimeAsync(700);
+      const resp = await pending;
+      expect(resp.status).toBe(200);
+      expect(rec.captured).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Retry-After HTTP-date in the past clamps to 0 (prompt jittered retry)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    try {
+      const { rec, client } = wired([
+        envelope(
+          503,
+          { error: "server_busy", message: "try later" },
+          { "Retry-After": new Date(Date.now() - 60_000).toUTCString() },
+        ),
+        jsonOk({ ok: true }),
+      ]);
+      const pending = client.call("/v1/models", { method: "GET" }, KEY);
+      await vi.advanceTimersByTimeAsync(200); // jitter bound only
+      const resp = await pending;
+      expect(resp.status).toBe(200);
+      expect(rec.captured).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a Retry-After hint above the old 10s cap is honored (20s), not silently shortened", async () => {
+    vi.useFakeTimers();
+    try {
+      const { rec, client } = wired([
+        envelope(
+          503,
+          { error: "server_busy", message: "try later" },
+          { "Retry-After": "20" },
+        ),
+        jsonOk({ ok: true }),
+      ]);
+      const pending = client.call("/v1/models", { method: "GET" }, KEY);
+      await vi.advanceTimersByTimeAsync(19_000);
+      expect(rec.captured).toHaveLength(1); // NOT retried early at 19s
+      await vi.advanceTimersByTimeAsync(1_200);
+      const resp = await pending;
+      expect(resp.status).toBe(200);
+      expect(rec.captured).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a Retry-After hint beyond the 30s ceiling is capped at 30s", async () => {
+    vi.useFakeTimers();
+    try {
+      const { rec, client } = wired([
+        envelope(
+          503,
+          { error: "server_busy", message: "try later" },
+          { "Retry-After": "300" },
+        ),
+        jsonOk({ ok: true }),
+      ]);
+      const pending = client.call("/v1/models", { method: "GET" }, KEY);
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(rec.captured).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1_200);
+      const resp = await pending;
+      expect(resp.status).toBe(200);
+      expect(rec.captured).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a malformed Retry-After falls back to the jittered backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const { rec, client } = wired([
+        envelope(
+          503,
+          { error: "server_busy", message: "try later" },
+          { "Retry-After": "soonish" },
+        ),
+        jsonOk({ ok: true }),
+      ]);
+      const pending = client.call("/v1/models", { method: "GET" }, KEY);
+      await vi.advanceTimersByTimeAsync(200);
+      const resp = await pending;
+      expect(resp.status).toBe(200);
+      expect(rec.captured).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ── Construction-time validation + UUID fallback ──────────────────────────
+
+describe("construction — baseUrl must parse as a URL", () => {
+  it("garbage baseUrl throws invalid_config at construction, not network_error later", () => {
+    for (const bad of ["not a url", "example.com/api", "http://", "/relative"]) {
+      let err: unknown = null;
+      try {
+        createCailClient({
+          baseUrl: bad,
+          app: APP,
+          fetchImpl: recordingFetch(jsonOk({})).fn,
+        });
+      } catch (e) {
+        err = e;
+      }
+      expect(err, `baseUrl=${JSON.stringify(bad)} must throw`).toBeInstanceOf(
+        CailError,
+      );
+      expect((err as CailError).code).toBe("invalid_config");
+      expect((err as CailError).status).toBe(0);
+    }
+  });
+
+  it("a well-formed absolute baseUrl is accepted", () => {
+    expect(() =>
+      createCailClient({
+        baseUrl: "https://api.ailab.example/",
+        app: APP,
+        fetchImpl: recordingFetch(jsonOk({})).fn,
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("run() idempotency key — non-secure-context fallback + caller override", () => {
+  it("mints a v4 Idempotency-Key even when crypto.randomUUID is unavailable", async () => {
+    const real = globalThis.crypto;
+    // Browser non-secure contexts expose getRandomValues but NOT randomUUID.
+    vi.stubGlobal("crypto", {
+      getRandomValues: <T extends ArrayBufferView | null>(arr: T): T =>
+        real.getRandomValues(arr as never) as T,
+    });
+    try {
+      const { rec, client } = wired(jsonOk({ ok: true }));
+      await client.run({ model: "@cf/m/x", input: "hi" }, KEY);
+      expect(rec.one.headers["idempotency-key"]).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("caller-supplied options.idempotencyKey reaches the wire and is stable across retries", async () => {
+    const { rec, client } = wired([{ networkError: true }, jsonOk({ ok: true })]);
+    const resp = await client.run(
+      { model: "@cf/m/x", input: { prompt: "hi" } },
+      KEY,
+      { idempotencyKey: "app-restart-safe-key-1" },
+    );
+    expect(resp.status).toBe(200);
+    expect(rec.captured).toHaveLength(2);
+    expect(rec.captured[0]!.headers["idempotency-key"]).toBe(
+      "app-restart-safe-key-1",
+    );
+    expect(rec.captured[1]!.headers["idempotency-key"]).toBe(
+      "app-restart-safe-key-1",
+    );
+  });
+
+  it("invalid options.idempotencyKey throws before fetch", async () => {
+    const { rec, client } = wired(jsonOk({}));
+    for (const bad of ["", "has\r\ncontrols", "x".repeat(256)]) {
+      await expect(
+        client.run({ model: "@cf/m/x", input: "hi" }, KEY, {
+          idempotencyKey: bad,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
+    }
+    expect(rec.captured).toHaveLength(0);
   });
 });
 
