@@ -262,6 +262,8 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
     const err = await client.call("/models", {}, JWT).catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(err.code).toBe("authentication_required");
+    expect(err.type).toBe("authentication_error");
+    expect(err.param).toBeNull();
     expect(err.status).toBe(401);
     expect(err.message).toBe(body.message);
     expect(err.extras["login_url"]).toBe("/login");
@@ -400,6 +402,20 @@ describe("I5 — retry policy", () => {
     const resp = await client.call("/models", { method: "POST" }, KEY);
     expect(resp.status).toBe(200);
     expect(rec.captured).toHaveLength(2);
+  });
+
+  it("x-should-retry:false suppresses the default 5xx retry", async () => {
+    const { rec, client } = wired([
+      envelope(
+        502,
+        { error: "upstream_service_error", message: "outcome uncertain" },
+        { "x-should-retry": "false" },
+      ),
+      jsonOk({ ok: true }),
+    ]);
+    const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
+    expect(err).toMatchObject({ code: "upstream_service_error", status: 502 });
+    expect(rec.captured).toHaveLength(1);
   });
 
   it("V21 network-error then 200 → retries", async () => {
@@ -801,6 +817,15 @@ describe("parseCailError (standalone)", () => {
     expect(err.code).toBe("quota_exceeded");
     expect(err.message).toBe("no budget");
   });
+  it("rejects the retired flat envelope", async () => {
+    const err = await parseCailError(
+      new Response(JSON.stringify({ error: "quota_exceeded", message: "old shape" }), {
+        status: 429,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(err.code).toBe("unknown_error");
+  });
   it("non-JSON → unknown_error", async () => {
     const err = await parseCailError(nonJson(500, "boom"));
     expect(err.code).toBe("unknown_error");
@@ -941,7 +966,7 @@ describe("chatFetch — SDK adapter", () => {
     );
     const resp = await client.chatFetch(KEY)(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] }));
     expect(resp.status).toBe(429);
-    expect(((await resp.json()) as { error: string }).error).toBe("rate_limited"); // body intact
+    expect(((await resp.json()) as any).error.code).toBe("rate_limited"); // body intact
     expect(rec.captured).toHaveLength(1);
   });
 
@@ -967,7 +992,7 @@ describe("chatFetch — SDK adapter", () => {
     const resp = await client.chatFetch(JWT)(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] }));
     expect(resp.status).toBe(401);
     expect(seen).toEqual(["authentication_required"]);
-    expect(((await resp.json()) as { error: string }).error).toBe("authentication_required"); // body intact
+    expect(((await resp.json()) as any).error.code).toBe("authentication_required"); // body intact
   });
 
   it("V34 serves ONLY the chat-completions URL — anything else throws before fetch", async () => {

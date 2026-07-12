@@ -132,13 +132,39 @@ export function jsonOk(body: unknown, status = 200): Response {
   });
 }
 
-/** A CAIL error-envelope response. */
+function errorTypeForStatus(status: number): string {
+  if (status === 401) return "authentication_error";
+  if (status === 403) return "permission_error";
+  if (status === 409) return "conflict_error";
+  if (status === 429) return "rate_limit_error";
+  if (status >= 500) return "server_error";
+  return "invalid_request_error";
+}
+
+/**
+ * A CAIL nested error-envelope response. Tests use the compact
+ * `{error:<code>, message, ...cail}` shorthand; this independent shadow
+ * producer serializes the public wire contract.
+ */
 export function envelope(
   status: number,
   body: Record<string, unknown>,
   extraHeaders?: Record<string, string>,
 ): Response {
-  return new Response(JSON.stringify(body), {
+  let wireBody: Record<string, unknown> = body;
+  if (typeof body["error"] === "string" && typeof body["message"] === "string") {
+    const { error: code, message, type, param, ...cail } = body;
+    wireBody = {
+      error: {
+        message,
+        type: typeof type === "string" ? type : errorTypeForStatus(status),
+        param: typeof param === "string" ? param : null,
+        code,
+        ...(Object.keys(cail).length > 0 ? { cail } : {}),
+      },
+    };
+  }
+  return new Response(JSON.stringify(wireBody), {
     status,
     headers: { "content-type": "application/json", ...extraHeaders },
   });

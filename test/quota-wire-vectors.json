@@ -159,8 +159,12 @@
       "name": "quota-unavailable-503",
       "status": 503,
       "body": {
-        "error": "quota_unavailable",
-        "message": "We could not read your quota right now. Model calls may still work; your budget still applies."
+        "error": {
+          "message": "We could not read your quota right now. Model calls may still work; your budget still applies.",
+          "type": "server_error",
+          "param": null,
+          "code": "quota_unavailable"
+        }
       },
       "expect_error_code": "quota_unavailable"
     }

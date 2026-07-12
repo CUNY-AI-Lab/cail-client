@@ -17,9 +17,9 @@
  *   - Optional `X-CAIL-Metadata` is validated and serialized as JSON (I3).
  *   - Non-2xx → a typed `CailError` with the envelope's `message` VERBATIM;
  *     a non-JSON error body is never swallowed as success (I4).
- *   - Never retry 4xx. Non-model calls and idempotency-keyed buffered `run()`
- *     calls retry 5xx + network up to `maxRetries`; chat/SSE stays single-attempt
- *     here because streaming replay is a separate protocol (I5).
+ *   - Never retry ordinary 4xx. Eligible calls retry 5xx + network up to
+ *     `maxRetries`, subject to the gateway's `x-should-retry` decision;
+ *     chat/SSE stays single-attempt (I5).
  *   - `401 authentication_required` invokes `onAuthRequired`, then still throws
  *     (I6).
  *   - 2xx `Response` returned by reference, body NOT buffered (I7).
@@ -42,16 +42,22 @@
  * — safe to show the user as-is (INTEGRATION.md §2).
  */
 export class CailError extends Error {
-    /** The envelope `error` code, e.g. `"quota_exceeded"`; `"unknown_error"` / `"network_error"` for non-envelope failures. */
+    /** The precise envelope code, e.g. `"quota_exceeded"`. */
     code;
+    /** The broad OpenAI-compatible error category. */
+    type;
+    /** The invalid request field when known. */
+    param;
     /** HTTP status; `0` for a network/transport failure with no response. */
     status;
-    /** Any extra envelope fields beyond `error`/`message` (e.g. `login_url`, `retry_after_seconds`). */
+    /** CAIL-specific fields from `error.cail`, plus advisory response metadata. */
     extras;
-    constructor(code, message, status, extras = {}) {
+    constructor(code, message, status, extras = {}, type = "unknown_error", param = null) {
         super(message);
         this.name = "CailError";
         this.code = code;
+        this.type = type;
+        this.param = param;
         this.status = status;
         this.extras = extras;
         // Preserve prototype chain when compiled to ES5-ish targets / bundlers.
@@ -267,6 +273,17 @@ function retryDelayMs(response, attempt) {
     const seconds = Number(retryAfter);
     return Math.min(Math.max(backoff, seconds * 1000), 10_000);
 }
+function shouldRetryHeader(response) {
+    const value = response.headers.get("x-should-retry")?.trim().toLowerCase();
+    if (value === "true")
+        return true;
+    if (value === "false")
+        return false;
+    return null;
+}
+function isRecord(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 function isReadableStreamBody(body) {
     return (typeof ReadableStream !== "undefined" && body instanceof ReadableStream);
 }
@@ -278,7 +295,7 @@ function addRetryAfterExtra(response, extras) {
 }
 /**
  * Parse a non-2xx `Response` into a `CailError` (I4). The envelope
- * `{error, message, ...extras}` is honored verbatim; a non-JSON or
+ * `{error:{message,type,param,code,cail?}}` is honored verbatim; a non-JSON or
  * shape-invalid body yields `code:"unknown_error"` with a generic message —
  * never swallowed as success.
  *
@@ -306,22 +323,22 @@ export async function parseCailError(response) {
     catch {
         parsed = undefined;
     }
-    if (typeof parsed === "object" &&
-        parsed !== null &&
-        !Array.isArray(parsed) &&
-        typeof parsed["error"] === "string" &&
-        typeof parsed["message"] === "string") {
-        const obj = parsed;
-        const code = obj["error"];
-        const message = obj["message"];
-        const extras = {};
-        for (const key of Object.keys(obj)) {
-            if (key !== "error" && key !== "message")
-                extras[key] = obj[key];
+    if (isRecord(parsed) && isRecord(parsed["error"])) {
+        const error = parsed["error"];
+        const cail = error["cail"];
+        const param = error["param"];
+        const validCail = cail === undefined || isRecord(cail);
+        const validParam = param === null || typeof param === "string";
+        if (typeof error["message"] === "string" &&
+            typeof error["type"] === "string" &&
+            typeof error["code"] === "string" &&
+            validParam &&
+            validCail) {
+            const extras = cail === undefined ? {} : { ...cail };
+            // Preserve Retry-After alongside the CAIL extension fields.
+            addRetryAfterExtra(response, extras);
+            return new CailError(error["code"], error["message"], status, extras, error["type"], param);
         }
-        // Preserve the Retry-After header alongside the envelope (INTEGRATION.md §2).
-        addRetryAfterExtra(response, extras);
-        return new CailError(code, message, status, extras);
     }
     // Non-JSON / shape-invalid body: NOT swallowed, NOT thrown away (I4).
     const extras = {};
@@ -568,6 +585,7 @@ export function createCailClient(opts) {
             // request is still completing. Only this explicit idempotency conflict is
             // retryable; ordinary 4xx responses remain final.
             if (response.status === 409 &&
+                shouldRetryHeader(response) !== false &&
                 internal?.idempotentModelRun === true &&
                 !hasNonReplayableBody &&
                 attempt < maxRetries) {
@@ -590,9 +608,10 @@ export function createCailClient(opts) {
                     continue;
                 }
             }
-            // I5 — retry policy: never other 4xx; retry 5xx up to maxRetries.
+            // I5 — retry eligible 5xx unless the gateway explicitly forbids it.
             const is5xx = response.status >= 500 && response.status < 600;
             if (is5xx &&
+                shouldRetryHeader(response) !== false &&
                 (internal?.modelRun !== true || internal?.idempotentModelRun === true) &&
                 retry5xx &&
                 !hasNonReplayableBody &&

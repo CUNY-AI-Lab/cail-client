@@ -15,7 +15,7 @@ const BASE = "https://api.ailab.example";
 const APP = "alt-text";
 const KEY: CailCredential = { kind: "key", token: "sk-cail-xyz" };
 const VECTORS_SHA256 =
-  "6e94350374877dbbaa8f8f479806b423af53af57ad576c1822abbf7ad63c3b50";
+  "31236fe7a9974893b9688290287d54ab527fab4598839f40e810dba460312047";
 
 const vectorsUrl = new URL("./quota-wire-vectors.json", import.meta.url);
 const vectorsBytes = readFileSync(vectorsUrl);

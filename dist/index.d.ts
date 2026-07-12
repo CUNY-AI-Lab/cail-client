@@ -17,9 +17,9 @@
  *   - Optional `X-CAIL-Metadata` is validated and serialized as JSON (I3).
  *   - Non-2xx → a typed `CailError` with the envelope's `message` VERBATIM;
  *     a non-JSON error body is never swallowed as success (I4).
- *   - Never retry 4xx. Non-model calls and idempotency-keyed buffered `run()`
- *     calls retry 5xx + network up to `maxRetries`; chat/SSE stays single-attempt
- *     here because streaming replay is a separate protocol (I5).
+ *   - Never retry ordinary 4xx. Eligible calls retry 5xx + network up to
+ *     `maxRetries`, subject to the gateway's `x-should-retry` decision;
+ *     chat/SSE stays single-attempt (I5).
  *   - `401 authentication_required` invokes `onAuthRequired`, then still throws
  *     (I6).
  *   - 2xx `Response` returned by reference, body NOT buffered (I7).
@@ -67,13 +67,17 @@ export interface CailQuotaSnapshot extends CailQuota {
  * — safe to show the user as-is (INTEGRATION.md §2).
  */
 export declare class CailError extends Error {
-    /** The envelope `error` code, e.g. `"quota_exceeded"`; `"unknown_error"` / `"network_error"` for non-envelope failures. */
+    /** The precise envelope code, e.g. `"quota_exceeded"`. */
     readonly code: string;
+    /** The broad OpenAI-compatible error category. */
+    readonly type: string;
+    /** The invalid request field when known. */
+    readonly param: string | null;
     /** HTTP status; `0` for a network/transport failure with no response. */
     readonly status: number;
-    /** Any extra envelope fields beyond `error`/`message` (e.g. `login_url`, `retry_after_seconds`). */
+    /** CAIL-specific fields from `error.cail`, plus advisory response metadata. */
     readonly extras: Record<string, unknown>;
-    constructor(code: string, message: string, status: number, extras?: Record<string, unknown>);
+    constructor(code: string, message: string, status: number, extras?: Record<string, unknown>, type?: string, param?: string | null);
 }
 export interface CailClientOptions {
     /** CAIL_API_BASE, e.g. `https://api.…` — no trailing slash (trailing slashes are trimmed). */
@@ -176,7 +180,7 @@ export declare function parseQuotaHeaders(headers: Headers): CailQuota | null;
 export declare function browserAuthRedirect(err: CailError): void;
 /**
  * Parse a non-2xx `Response` into a `CailError` (I4). The envelope
- * `{error, message, ...extras}` is honored verbatim; a non-JSON or
+ * `{error:{message,type,param,code,cail?}}` is honored verbatim; a non-JSON or
  * shape-invalid body yields `code:"unknown_error"` with a generic message —
  * never swallowed as success.
  *
