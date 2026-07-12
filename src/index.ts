@@ -37,6 +37,29 @@
  * ambient platform (`DOM`/Workers) types leak out of the `.d.ts`.
  */
 
+import {
+  outboundCorrelationHeaders,
+  TRACEPARENT_HEADER,
+  CAIL_REQUEST_ID_HEADER,
+  type CailCorrelation,
+} from "@cuny-ai-lab/cail-log";
+
+/**
+ * The fleet correlation contract, re-exported VERBATIM from
+ * `@cuny-ai-lab/cail-log` so consumers have one source of truth where their
+ * fleet requests originate: adopt inbound ids with
+ * {@link correlationFromHeaders}, forward them with
+ * {@link outboundCorrelationHeaders} (or by passing `correlation` in
+ * {@link CailCallOptions} and letting the client attach the headers).
+ */
+export {
+  correlationFromHeaders,
+  outboundCorrelationHeaders,
+  TRACEPARENT_HEADER,
+  CAIL_REQUEST_ID_HEADER,
+} from "@cuny-ai-lab/cail-log";
+export type { CailCorrelation, CailHeadersLike } from "@cuny-ai-lab/cail-log";
+
 /** Credential forwarded on a call. Exactly one kind reaches the wire (I1). */
 export type CailCredential =
   | { kind: "jwt"; token: string }
@@ -126,6 +149,16 @@ export interface CailClientOptions {
 export interface CailCallOptions {
   /** Per-call spend metadata (I3), merged over any `X-CAIL-Metadata` already in `init.headers`. */
   metadata?: CailMetadata;
+  /**
+   * Optional correlation to forward downstream (the cail-log contract). When
+   * present, the client attaches `traceparent` + `X-CAIL-Request-Id` via
+   * `outboundCorrelationHeaders(correlation)` so the gateway/Workers can adopt
+   * the trace. Typically obtained from `correlationFromHeaders(request)` at
+   * the consuming app's own request boundary. Absent → no correlation headers
+   * are added (no behavior change). A malformed value throws a `CailError`
+   * (code `"invalid_correlation"`, status 0) before anything hits the wire.
+   */
+  correlation?: CailCorrelation;
 }
 
 /** The canonical model request accepted by `POST /v1/run`. */
@@ -783,6 +816,32 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     deleteHeaderCI(headers, "X-CAIL-Metadata");
     if (merged !== undefined) {
       headers["X-CAIL-Metadata"] = serializeMetadata(merged);
+    }
+
+    // Optional correlation forwarding (the cail-log contract): attach
+    // `traceparent` + `X-CAIL-Request-Id` so the next hop can ADOPT this
+    // trace. Applied once, before any transport attempt — retries of the same
+    // logical request deliberately carry the same correlation. Absent → no
+    // headers added, no behavior change.
+    if (options?.correlation !== undefined) {
+      let correlationHeaders: Record<string, string>;
+      try {
+        correlationHeaders = outboundCorrelationHeaders(options.correlation);
+      } catch (err) {
+        // cail-log throws TypeError on a malformed correlation (forwarding a
+        // broken id would silently fork the trace); surface it in this
+        // client's error vocabulary, client-side (status 0), nothing on the wire.
+        throw new CailError(
+          "invalid_correlation",
+          err instanceof Error && err.message
+            ? err.message
+            : "Invalid correlation: expected { trace_id, span_id, request_id } from correlationFromHeaders().",
+          0,
+        );
+      }
+      deleteHeaderCI(headers, TRACEPARENT_HEADER);
+      deleteHeaderCI(headers, CAIL_REQUEST_ID_HEADER);
+      Object.assign(headers, correlationHeaders);
     }
 
     const url = `${baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;

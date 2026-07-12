@@ -36,6 +36,16 @@
  * The public surface is `string`/`number`/plain-object/`Response` only — no
  * ambient platform (`DOM`/Workers) types leak out of the `.d.ts`.
  */
+import { outboundCorrelationHeaders, TRACEPARENT_HEADER, CAIL_REQUEST_ID_HEADER, } from "@cuny-ai-lab/cail-log";
+/**
+ * The fleet correlation contract, re-exported VERBATIM from
+ * `@cuny-ai-lab/cail-log` so consumers have one source of truth where their
+ * fleet requests originate: adopt inbound ids with
+ * {@link correlationFromHeaders}, forward them with
+ * {@link outboundCorrelationHeaders} (or by passing `correlation` in
+ * {@link CailCallOptions} and letting the client attach the headers).
+ */
+export { correlationFromHeaders, outboundCorrelationHeaders, TRACEPARENT_HEADER, CAIL_REQUEST_ID_HEADER, } from "@cuny-ai-lab/cail-log";
 /**
  * A typed CAIL backbone error. Thrown by `call()` on any non-2xx response (I4)
  * and on retry exhaustion (I5). `message` is the envelope's `message` verbatim
@@ -497,6 +507,28 @@ export function createCailClient(opts) {
         deleteHeaderCI(headers, "X-CAIL-Metadata");
         if (merged !== undefined) {
             headers["X-CAIL-Metadata"] = serializeMetadata(merged);
+        }
+        // Optional correlation forwarding (the cail-log contract): attach
+        // `traceparent` + `X-CAIL-Request-Id` so the next hop can ADOPT this
+        // trace. Applied once, before any transport attempt — retries of the same
+        // logical request deliberately carry the same correlation. Absent → no
+        // headers added, no behavior change.
+        if (options?.correlation !== undefined) {
+            let correlationHeaders;
+            try {
+                correlationHeaders = outboundCorrelationHeaders(options.correlation);
+            }
+            catch (err) {
+                // cail-log throws TypeError on a malformed correlation (forwarding a
+                // broken id would silently fork the trace); surface it in this
+                // client's error vocabulary, client-side (status 0), nothing on the wire.
+                throw new CailError("invalid_correlation", err instanceof Error && err.message
+                    ? err.message
+                    : "Invalid correlation: expected { trace_id, span_id, request_id } from correlationFromHeaders().", 0);
+            }
+            deleteHeaderCI(headers, TRACEPARENT_HEADER);
+            deleteHeaderCI(headers, CAIL_REQUEST_ID_HEADER);
+            Object.assign(headers, correlationHeaders);
         }
         const url = `${baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
         // I8 — body + model forwarded verbatim: we never touch init.body.

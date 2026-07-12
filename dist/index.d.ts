@@ -36,6 +36,17 @@
  * The public surface is `string`/`number`/plain-object/`Response` only — no
  * ambient platform (`DOM`/Workers) types leak out of the `.d.ts`.
  */
+import { type CailCorrelation } from "@cuny-ai-lab/cail-log";
+/**
+ * The fleet correlation contract, re-exported VERBATIM from
+ * `@cuny-ai-lab/cail-log` so consumers have one source of truth where their
+ * fleet requests originate: adopt inbound ids with
+ * {@link correlationFromHeaders}, forward them with
+ * {@link outboundCorrelationHeaders} (or by passing `correlation` in
+ * {@link CailCallOptions} and letting the client attach the headers).
+ */
+export { correlationFromHeaders, outboundCorrelationHeaders, TRACEPARENT_HEADER, CAIL_REQUEST_ID_HEADER, } from "@cuny-ai-lab/cail-log";
+export type { CailCorrelation, CailHeadersLike } from "@cuny-ai-lab/cail-log";
 /** Credential forwarded on a call. Exactly one kind reaches the wire (I1). */
 export type CailCredential = {
     kind: "jwt";
@@ -105,6 +116,16 @@ export interface CailClientOptions {
 export interface CailCallOptions {
     /** Per-call spend metadata (I3), merged over any `X-CAIL-Metadata` already in `init.headers`. */
     metadata?: CailMetadata;
+    /**
+     * Optional correlation to forward downstream (the cail-log contract). When
+     * present, the client attaches `traceparent` + `X-CAIL-Request-Id` via
+     * `outboundCorrelationHeaders(correlation)` so the gateway/Workers can adopt
+     * the trace. Typically obtained from `correlationFromHeaders(request)` at
+     * the consuming app's own request boundary. Absent → no correlation headers
+     * are added (no behavior change). A malformed value throws a `CailError`
+     * (code `"invalid_correlation"`, status 0) before anything hits the wire.
+     */
+    correlation?: CailCorrelation;
 }
 /** The canonical model request accepted by `POST /v1/run`. */
 export interface CailRunRequest {

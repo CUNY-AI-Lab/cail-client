@@ -29,6 +29,9 @@
     "prepublishOnly": "bun run build",
     "prepare": "tsc -p tsconfig.build.json"
   },
+  "dependencies": {
+    "@cuny-ai-lab/cail-log": "github:CUNY-AI-Lab/cail-log#95e028a"
+  },
   "devDependencies": {
     "@types/node": "^20.17.6",
     "typescript": "^5.6.3",
