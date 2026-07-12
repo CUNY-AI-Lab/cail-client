@@ -16,9 +16,9 @@
  *   - Optional `X-CAIL-Metadata` is validated and serialized as JSON (I3).
  *   - Non-2xx → a typed `CailError` with the envelope's `message` VERBATIM;
  *     a non-JSON error body is never swallowed as success (I4).
- *   - Never retry 4xx. Non-model calls retry 5xx + network up to `maxRetries`
- *     with backoff; billed model POSTs make one attempt until the gateway
- *     provides execution idempotency (I5).
+ *   - Never retry 4xx. Non-model calls and idempotency-keyed buffered `run()`
+ *     calls retry 5xx + network up to `maxRetries`; chat/SSE stays single-attempt
+ *     here because streaming replay is a separate protocol (I5).
  *   - `401 authentication_required` invokes `onAuthRequired`, then still throws
  *     (I6).
  *   - 2xx `Response` returned by reference, body NOT buffered (I7).
@@ -104,8 +104,9 @@ export interface CailClientOptions {
   /** Injectable fetch (tests / custom transports). Default: the global `fetch`. */
   fetchImpl?: typeof fetch;
   /**
-   * Max retries for eligible non-model 5xx + network errors (I5). Default 2
-   * (when absent). Never applies to 4xx or billed model POSTs. A PRESENT value
+   * Max retries for eligible non-model and idempotency-keyed buffered model
+   * 5xx + network errors (I5). Default 2. Never applies to 4xx or streaming
+   * model POSTs. A PRESENT value
    * must be a finite integer >= 0 — anything else throws `invalid_config` at
    * construction (fail loud, matching `baseUrl`/`app`/`fetchImpl`; invalid
    * config is never silently coerced).
@@ -660,7 +661,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     init: RequestInit,
     credential: CailCredential,
     options?: CailCallOptions,
-    internal?: { retry5xx?: boolean; modelRun?: boolean; raw?: boolean },
+    internal?: { retry5xx?: boolean; modelRun?: boolean; idempotentModelRun?: boolean; raw?: boolean },
   ): Promise<Response> {
     if (
       (path === "/v1/run" || path === "/v1/chat/completions") &&
@@ -777,7 +778,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         if (internal?.raw === true) throw err;
         // Network/transport error (I5): retry up to maxRetries, else throw.
         if (
-          internal?.modelRun !== true &&
+          (internal?.modelRun !== true || internal?.idempotentModelRun === true) &&
           !hasNonReplayableBody &&
           isRetriableNetworkError(err) &&
           attempt < maxRetries
@@ -853,7 +854,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
       const is5xx = response.status >= 500 && response.status < 600;
       if (
         is5xx &&
-        internal?.modelRun !== true &&
+        (internal?.modelRun !== true || internal?.idempotentModelRun === true) &&
         retry5xx &&
         !hasNonReplayableBody &&
         attempt < maxRetries
@@ -943,12 +944,15 @@ export function createCailClient(opts: CailClientOptions): CailClient {
       "/v1/run",
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
         body,
       },
       credential,
       options,
-      { modelRun: true },
+      { modelRun: true, idempotentModelRun: true },
     );
   }
 

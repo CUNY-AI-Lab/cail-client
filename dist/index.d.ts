@@ -16,9 +16,9 @@
  *   - Optional `X-CAIL-Metadata` is validated and serialized as JSON (I3).
  *   - Non-2xx → a typed `CailError` with the envelope's `message` VERBATIM;
  *     a non-JSON error body is never swallowed as success (I4).
- *   - Never retry 4xx. Non-model calls retry 5xx + network up to `maxRetries`
- *     with backoff; billed model POSTs make one attempt until the gateway
- *     provides execution idempotency (I5).
+ *   - Never retry 4xx. Non-model calls and idempotency-keyed buffered `run()`
+ *     calls retry 5xx + network up to `maxRetries`; chat/SSE stays single-attempt
+ *     here because streaming replay is a separate protocol (I5).
  *   - `401 authentication_required` invokes `onAuthRequired`, then still throws
  *     (I6).
  *   - 2xx `Response` returned by reference, body NOT buffered (I7).
@@ -88,8 +88,9 @@ export interface CailClientOptions {
     /** Injectable fetch (tests / custom transports). Default: the global `fetch`. */
     fetchImpl?: typeof fetch;
     /**
-     * Max retries for eligible non-model 5xx + network errors (I5). Default 2
-     * (when absent). Never applies to 4xx or billed model POSTs. A PRESENT value
+     * Max retries for eligible non-model and idempotency-keyed buffered model
+     * 5xx + network errors (I5). Default 2. Never applies to 4xx or streaming
+     * model POSTs. A PRESENT value
      * must be a finite integer >= 0 — anything else throws `invalid_config` at
      * construction (fail loud, matching `baseUrl`/`app`/`fetchImpl`; invalid
      * config is never silently coerced).

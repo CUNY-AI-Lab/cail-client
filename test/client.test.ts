@@ -436,14 +436,19 @@ describe("I5 — retry policy", () => {
     expect(rec.captured).toHaveLength(3); // 1 + 2 retries
   });
 
-  it("model POST network loss is never retried without gateway idempotency", async () => {
+  it("buffered model POST retries network loss with one stable idempotency key", async () => {
     const { rec, client } = wired([{ networkError: true }, jsonOk({ ok: true })]);
 
-    await expect(
-      client.run({ model: "@cf/m/x", input: { prompt: "hi" } }, KEY),
-    ).rejects.toMatchObject({ code: "network_error", status: 0 });
+    const response = await client.run(
+      { model: "@cf/m/x", input: { prompt: "hi" } },
+      KEY,
+    );
 
-    expect(rec.captured).toHaveLength(1);
+    expect(response.status).toBe(200);
+    expect(rec.captured).toHaveLength(2);
+    const firstKey = rec.captured[0]!.headers["idempotency-key"];
+    expect(firstKey).toMatch(/^[0-9a-f-]{36}$/);
+    expect(rec.captured[1]!.headers["idempotency-key"]).toBe(firstKey);
   });
 
   it("model POST 5xx is never retried without gateway idempotency", async () => {
