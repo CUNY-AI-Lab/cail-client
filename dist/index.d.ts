@@ -1,10 +1,11 @@
 /**
  * @cuny-ai-lab/cail-client — the CAIL model-proxy API client.
  *
- * The consumer-side twin of `@cuny-ai-lab/cail-identity`: the one library every
- * CAIL tool uses to *call* the model proxy correctly. It owns the credential /
- * header / error / retry contract from `docs/INTEGRATION.md` §1–2 so no tool
- * re-derives them.
+ * The consumer-side twin of `@cuny-ai-lab/cail-identity`: the one library CUNY
+ * applications use to *call* the model proxy correctly. It owns the credential
+ * / header / error / retry contract from `docs/INTEGRATION.md` §1–2 so no
+ * application re-derives them. Consumers include independent CUNY apps and
+ * scripts, Kale apps, and centrally hosted CAIL tools.
  *
  * Design contract (see README + CAIL_CLIENT_PRIMITIVE_SPEC.md, invariants
  * I1–I9):

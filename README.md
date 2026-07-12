@@ -1,8 +1,10 @@
 # @cuny-ai-lab/cail-client
 
-The shared Web-standard client for the CAIL gateway. It sends exactly one CAIL
-credential, stamps spend-attribution headers, preserves quota information, and
-turns gateway error envelopes into typed errors.
+The shared Web-standard client for CUNY applications that use the CAIL
+gateway. It sends exactly one user-bound CAIL credential, stamps
+spend-attribution headers, preserves quota information, and turns gateway
+error envelopes into typed errors. It works for independent CUNY applications
+and scripts as well as Kale and centrally hosted CAIL tools.
 
 It runs in browsers, Workers, and Node 20 or newer with no runtime dependencies.
 
@@ -49,7 +51,9 @@ try {
 }
 ```
 
-For server or background work, pass a personal or delegated CAIL key:
+For server or background work, pass a personal or delegated CAIL key. Both key
+types resolve to the CUNY user whose quota pays for the call; a delegated key
+is short-lived and app-locked for unattended work.
 
 ```ts
 const response = await cail.run(
@@ -148,7 +152,8 @@ The client enforces these wire rules:
 
 - `{ kind: "jwt" }` sends `X-CAIL-Identity-JWT` and removes `Authorization`.
 - `{ kind: "key" }` sends `Authorization: Bearer <key>` and removes the JWT
-  header.
+  header. The gateway resolves personal and delegated keys to their owning
+  CAIL subject; the client never accepts a provider key.
 - `X-CAIL-App` is always the validated app slug supplied at construction.
 - Optional `X-CAIL-Metadata` accepts at most eight string or finite-number
   values. Reserved identity and prototype-pollution keys are rejected.
