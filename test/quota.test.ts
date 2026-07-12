@@ -15,7 +15,7 @@ const BASE = "https://api.ailab.example";
 const APP = "alt-text";
 const KEY: CailCredential = { kind: "key", token: "sk-cail-xyz" };
 const VECTORS_SHA256 =
-  "31236fe7a9974893b9688290287d54ab527fab4598839f40e810dba460312047";
+  "c521fc0744efcac9fbc68d89cf0f7600a9a7a1099bbe9bd99cdb4b84cd50ffce";
 
 const vectorsUrl = new URL("./quota-wire-vectors.json", import.meta.url);
 const vectorsBytes = readFileSync(vectorsUrl);
@@ -36,6 +36,7 @@ interface QuotaBodyCase {
 interface ErrorCase {
   name: string;
   status: number;
+  headers: Record<string, string>;
   body: Record<string, unknown>;
   expect_error_code: string;
 }
@@ -85,12 +86,24 @@ describe("quota wire vectors", () => {
   }
 
   for (const c of vectors.error_cases) {
-    it(`getQuota error: ${c.name}`, async () => {
-      const { client } = clientFor(envelope(c.status, c.body), 0);
+    it(`producer nested error: ${c.name}`, async () => {
+      const response = new Response(JSON.stringify(c.body), {
+        status: c.status,
+        headers: c.headers,
+      });
+      const { client } = clientFor(response, 0);
       const err = await client.getQuota(KEY).catch((e) => e);
 
       expect(err).toBeInstanceOf(CailError);
       expect(err.code).toBe(c.expect_error_code);
+      expect(err.status).toBe(c.status);
+      expect(err.extras.request_id).toBe(c.headers["x-request-id"]);
+      expect(err.extras.should_retry).toBe(
+        c.headers["x-should-retry"] === "true",
+      );
+      expect(err.message).toBe(
+        (c.body.error as Record<string, unknown>).message,
+      );
     });
   }
 

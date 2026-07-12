@@ -134,11 +134,7 @@ their quota state.
 `/v1/models` and key delegation. Do not use it for model invocation.
 
 ```ts
-const response = await cail.call(
-  "/v1/models",
-  { method: "GET" },
-  credential,
-);
+const response = await cail.call("/v1/models", { method: "GET" }, credential);
 ```
 
 For an explicit quota snapshot:
@@ -174,7 +170,9 @@ generates one UUID v4 `Idempotency-Key` before its retry loop and reuses it for
 every attempt, allowing safe network and 5xx retries through the gateway's
 durable claim/replay contract; callers may supply their own key via
 `options.idempotencyKey` to deduplicate one logical run across their own
-restarts. Streaming `chatCompletions()` calls are never
+restarts. A caller-supplied key must be a UUID v4 (for example, one saved from
+`crypto.randomUUID()`); invalid values fail before any request reaches the
+gateway. Streaming `chatCompletions()` calls are never
 retried by this client. The client also never retries 4xx, aborted requests, or
 requests with one-shot stream bodies. Generic `call()` requests using a
 non-idempotent method (POST/PATCH) are retried only when an `Idempotency-Key`
@@ -218,6 +216,17 @@ bun run test
 
 The tests use a recording fetch mock to assert outgoing URLs, headers, methods,
 and bodies at the wire boundary.
+
+`test/quota-wire-vectors.json` is a byte-for-byte vendored copy of the
+producer-owned `cail-gateway/model-proxy/test/quota-wire-vectors.json`. Its
+SHA-256 is pinned in both repositories. The vectors cover quota headers and
+the nested `{ error: { message, type, param, code, cail? } }` envelope,
+including authentication, request IDs, retry intent, quota extensions, and
+the distinction between native quota exhaustion and upstream rate limiting.
+The client parses these raw producer bodies directly and separately rejects
+the retired flat envelope. Change the producer artifact first, then copy the
+whole file byte-for-byte and update both hash assertions in one coordinated
+change; the client must not introduce a second schema.
 
 ## License
 

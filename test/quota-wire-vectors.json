@@ -1,6 +1,6 @@
 {
-  "version": "1",
-  "contract": "cail-gateway docs/QUOTA_SURFACE.md v3 (2026-07-08)",
+  "version": "2",
+  "contract": "cail-gateway nested error and quota wire contract (2026-07-12)",
   "sync": "CANONICAL COPY lives in cail-gateway model-proxy/test/quota-wire-vectors.json; cail-client vendors a byte-identical copy at test/quota-wire-vectors.json. Both repos' tests pin this file's SHA-256 — change it in BOTH repos in one deliberate step or tests fail.",
   "header_cases": [
     {
@@ -157,7 +157,14 @@
   "error_cases": [
     {
       "name": "quota-unavailable-503",
+      "producer": "quota_unavailable",
       "status": 503,
+      "headers": {
+        "content-type": "application/json",
+        "x-cail-request-id": "vector-request-503",
+        "x-request-id": "vector-request-503",
+        "x-should-retry": "true"
+      },
       "body": {
         "error": {
           "message": "We could not read your quota right now. Model calls may still work; your budget still applies.",
@@ -167,6 +174,78 @@
         }
       },
       "expect_error_code": "quota_unavailable"
+    },
+    {
+      "name": "native-quota-exceeded-429",
+      "producer": "native_quota_exceeded",
+      "status": 429,
+      "headers": {
+        "content-type": "application/json",
+        "retry-after": "3600",
+        "x-cail-request-id": "vector-request-quota",
+        "x-request-id": "vector-request-quota",
+        "x-should-retry": "false"
+      },
+      "body": {
+        "error": {
+          "message": "The CAIL model budget is exhausted for this period.",
+          "type": "rate_limit_error",
+          "param": null,
+          "code": "quota_exceeded",
+          "cail": {
+            "retry_after_seconds": 3600
+          }
+        }
+      },
+      "expect_error_code": "quota_exceeded"
+    },
+    {
+      "name": "opaque-upstream-rate-limit-429",
+      "producer": "upstream_rate_limited",
+      "status": 429,
+      "headers": {
+        "content-type": "application/json",
+        "retry-after": "10",
+        "x-cail-request-id": "vector-request-rate",
+        "x-request-id": "vector-request-rate",
+        "x-should-retry": "true"
+      },
+      "body": {
+        "error": {
+          "message": "The upstream model service is temporarily rate limited. Please retry later.",
+          "type": "rate_limit_error",
+          "param": null,
+          "code": "upstream_rate_limited",
+          "cail": {
+            "retry_after_seconds": 10
+          }
+        }
+      },
+      "expect_error_code": "upstream_rate_limited"
+    },
+    {
+      "name": "authentication-required-401",
+      "producer": "authentication_required",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json",
+        "www-authenticate": "Bearer realm=\"CAIL\"",
+        "x-cail-request-id": "vector-request-auth",
+        "x-request-id": "vector-request-auth",
+        "x-should-retry": "false"
+      },
+      "body": {
+        "error": {
+          "message": "Sign in with CUNY Login.",
+          "type": "authentication_error",
+          "param": null,
+          "code": "authentication_required",
+          "cail": {
+            "login_url": "/login"
+          }
+        }
+      },
+      "expect_error_code": "authentication_required"
     }
   ]
 }

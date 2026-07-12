@@ -82,7 +82,12 @@ describe("I1 — exactly one credential on the wire", () => {
       const { rec, client } = wired(jsonOk({ ok: true }));
       await client.call(
         "/v1/models",
-        { headers: { "X-CAIL-Identity-JWT": "stale", Authorization: "Bearer d" } },
+        {
+          headers: {
+            "X-CAIL-Identity-JWT": "stale",
+            Authorization: "Bearer d",
+          },
+        },
         JWT,
       );
       const both =
@@ -156,9 +161,20 @@ describe("I2 — X-CAIL-App", () => {
   });
 
   it("V6 invalid app slug throws at construct (Bad App / empty / 65 chars)", () => {
-    for (const bad of ["Bad App", "", "a".repeat(65), "-lead", "UPPER", "a b"]) {
+    for (const bad of [
+      "Bad App",
+      "",
+      "a".repeat(65),
+      "-lead",
+      "UPPER",
+      "a b",
+    ]) {
       expect(() =>
-        createCailClient({ baseUrl: BASE, app: bad, fetchImpl: recordingFetch(jsonOk({})).fn }),
+        createCailClient({
+          baseUrl: BASE,
+          app: bad,
+          fetchImpl: recordingFetch(jsonOk({})).fn,
+        }),
       ).toThrowError(CailError);
     }
     // A valid 64-char slug is accepted.
@@ -176,23 +192,31 @@ describe("I3 — X-CAIL-Metadata validation", () => {
   it("V7 metadata {project:'x'} → X-CAIL-Metadata JSON present", async () => {
     const { rec, client } = wired(jsonOk({}));
     await client.call("/v1/models", {}, JWT, { metadata: { project: "x" } });
-    expect(rec.one.headers["x-cail-metadata"]).toBe(JSON.stringify({ project: "x" }));
+    expect(rec.one.headers["x-cail-metadata"]).toBe(
+      JSON.stringify({ project: "x" }),
+    );
   });
 
   it("V8 9 keys → throws", async () => {
     const { client } = wired(jsonOk({}));
     const meta: Record<string, string> = {};
     for (let i = 0; i < 9; i++) meta[`k${i}`] = "v";
-    await expect(client.call("/v1/models", {}, JWT, { metadata: meta })).rejects.toBeInstanceOf(CailError);
+    await expect(
+      client.call("/v1/models", {}, JWT, { metadata: meta }),
+    ).rejects.toBeInstanceOf(CailError);
   });
 
   it("V9 value object/array → throws", async () => {
     const { client } = wired(jsonOk({}));
     await expect(
-      client.call("/v1/models", {}, JWT, { metadata: { k: { nested: 1 } as unknown as string } }),
+      client.call("/v1/models", {}, JWT, {
+        metadata: { k: { nested: 1 } as unknown as string },
+      }),
     ).rejects.toBeInstanceOf(CailError);
     await expect(
-      client.call("/v1/models", {}, JWT, { metadata: { k: [1, 2] as unknown as string } }),
+      client.call("/v1/models", {}, JWT, {
+        metadata: { k: [1, 2] as unknown as string },
+      }),
     ).rejects.toBeInstanceOf(CailError);
   });
 
@@ -223,8 +247,7 @@ describe("I3 — X-CAIL-Metadata validation", () => {
         "/v1/models",
         {
           headers: {
-            "X-CAIL-Metadata":
-              '{"__proto__":{"nested":1},"project":"x"}',
+            "X-CAIL-Metadata": '{"__proto__":{"nested":1},"project":"x"}',
           },
         },
         JWT,
@@ -286,7 +309,11 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
 
   it("V14 403 forbidden → typed", async () => {
     const { client } = wired(
-      envelope(403, { error: "forbidden", message: "Missing entitlement.", missing_entitlement: "pro" }),
+      envelope(403, {
+        error: "forbidden",
+        message: "Missing entitlement.",
+        missing_entitlement: "pro",
+      }),
     );
     const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
     expect(err.code).toBe("forbidden");
@@ -296,9 +323,15 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
 
   it("V15 409 key_limit_reached → typed", async () => {
     const { client } = wired(
-      envelope(409, { error: "key_limit_reached", message: "Too many keys.", limit: 10 }),
+      envelope(409, {
+        error: "key_limit_reached",
+        message: "Too many keys.",
+        limit: 10,
+      }),
     );
-    const err = await client.call("/keys", { method: "POST" }, JWT).catch((e) => e);
+    const err = await client
+      .call("/keys", { method: "POST" }, JWT)
+      .catch((e) => e);
     expect(err.code).toBe("key_limit_reached");
     expect(err.status).toBe(409);
     expect(err.extras["limit"]).toBe(10);
@@ -307,7 +340,10 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
   it("V16 502 upstream_auth_error → typed", async () => {
     // 502 is 5xx: disable retries so the single envelope surfaces as the error.
     const { client } = wired(
-      envelope(502, { error: "upstream_auth_error", message: "Contact ailab@gc.cuny.edu." }),
+      envelope(502, {
+        error: "upstream_auth_error",
+        message: "Contact ailab@gc.cuny.edu.",
+      }),
       { maxRetries: 0 },
     );
     const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
@@ -317,7 +353,10 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
 
   it("V17 503 sso_unavailable → typed", async () => {
     const { client } = wired(
-      envelope(503, { error: "sso_unavailable", message: "SSO is temporarily down." }),
+      envelope(503, {
+        error: "sso_unavailable",
+        message: "SSO is temporarily down.",
+      }),
       { maxRetries: 0 },
     );
     const err = await client.call("/v1/models", {}, JWT).catch((e) => e);
@@ -326,9 +365,12 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
   });
 
   it("V18 non-JSON 500 body → unknown_error, NOT swallowed as success", async () => {
-    const { client } = wired(nonJson(500, "<html>Internal Server Error</html>"), {
-      maxRetries: 0,
-    });
+    const { client } = wired(
+      nonJson(500, "<html>Internal Server Error</html>"),
+      {
+        maxRetries: 0,
+      },
+    );
     const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
     expect(err.code).toBe("unknown_error");
@@ -385,7 +427,9 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
 
   it("V19 message is byte-identical to the envelope's message (no rewording)", async () => {
     const exact = "Précisely thîs — verbatim, incl. 中文 & symbols: <>&\"'.";
-    const { client } = wired(envelope(400, { error: "bad_request", message: exact }));
+    const { client } = wired(
+      envelope(400, { error: "bad_request", message: exact }),
+    );
     const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
     expect(err.message).toBe(exact);
   });
@@ -454,7 +498,10 @@ describe("I5 — retry policy", () => {
   });
 
   it("V21 network-error then 200 → retries", async () => {
-    const { rec, client } = wired([{ networkError: true }, jsonOk({ ok: true })]);
+    const { rec, client } = wired([
+      { networkError: true },
+      jsonOk({ ok: true }),
+    ]);
     const resp = await client.call("/v1/models", { method: "GET" }, KEY);
     expect(resp.status).toBe(200);
     expect(rec.captured).toHaveLength(2);
@@ -465,7 +512,9 @@ describe("I5 — retry policy", () => {
       envelope(400, { error: "bad_request", message: "bad" }),
       jsonOk({ ok: true }), // must never be reached
     ]);
-    await expect(client.call("/v1/models", {}, KEY)).rejects.toBeInstanceOf(CailError);
+    await expect(client.call("/v1/models", {}, KEY)).rejects.toBeInstanceOf(
+      CailError,
+    );
     expect(rec.captured).toHaveLength(1);
   });
 
@@ -474,13 +523,16 @@ describe("I5 — retry policy", () => {
       envelope(429, { error: "quota_exceeded", message: "budget" }),
       jsonOk({ ok: true }),
     ]);
-    await expect(client.call("/v1/models", {}, KEY)).rejects.toBeInstanceOf(CailError);
+    await expect(client.call("/v1/models", {}, KEY)).rejects.toBeInstanceOf(
+      CailError,
+    );
     expect(rec.captured).toHaveLength(1);
   });
 
   it("V23b retries exhausted on persistent 5xx → throws typed", async () => {
     // One envelope per expected wire call (the mock throws on over-calling).
-    const down = () => envelope(500, { error: "server_error", message: "still down" });
+    const down = () =>
+      envelope(500, { error: "server_error", message: "still down" });
     const { rec, client } = wired([down(), down(), down()], { maxRetries: 2 });
     const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
     expect(err).toBeInstanceOf(CailError);
@@ -488,7 +540,10 @@ describe("I5 — retry policy", () => {
   });
 
   it("buffered model POST retries network loss with one stable idempotency key", async () => {
-    const { rec, client } = wired([{ networkError: true }, jsonOk({ ok: true })]);
+    const { rec, client } = wired([
+      { networkError: true },
+      jsonOk({ ok: true }),
+    ]);
 
     const response = await client.run(
       { model: "@cf/m/x", input: { prompt: "hi" } },
@@ -569,7 +624,9 @@ describe("I5 — retry policy", () => {
       } catch (e) {
         err = e;
       }
-      expect(err, `maxRetries=${String(bad)} must throw`).toBeInstanceOf(CailError);
+      expect(err, `maxRetries=${String(bad)} must throw`).toBeInstanceOf(
+        CailError,
+      );
       expect((err as CailError).code).toBe("invalid_config");
       expect((err as CailError).message).toContain("maxRetries");
     }
@@ -577,7 +634,8 @@ describe("I5 — retry policy", () => {
 
   it("V23d absent maxRetries defaults to 2 (1 + 2 attempts); valid values honored", async () => {
     // Absent → default 2 retries: exactly three wire calls.
-    const down = () => envelope(500, { error: "server_error", message: "still down" });
+    const down = () =>
+      envelope(500, { error: "server_error", message: "still down" });
     {
       const { rec, client } = wired([down(), down(), down()]);
       const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
@@ -661,7 +719,10 @@ describe("I5 — retry policy", () => {
   });
 
   it("V28b ReadableStream body + network error → no retry, network_error", async () => {
-    const { rec, client } = wired([{ networkError: true }, jsonOk({ ok: true })]);
+    const { rec, client } = wired([
+      { networkError: true },
+      jsonOk({ ok: true }),
+    ]);
     const err = await client
       .call("/keys", { method: "POST", body: readableBody() }, KEY)
       .catch((e) => e);
@@ -693,7 +754,11 @@ describe("I5 — retry policy", () => {
 describe("I6 — 401 hook", () => {
   it("V24 401 authentication_required → onAuthRequired invoked once with the err, still throws", async () => {
     const spy = vi.fn();
-    const body = { error: "authentication_required", message: "sign in", login_url: "/login" };
+    const body = {
+      error: "authentication_required",
+      message: "sign in",
+      login_url: "/login",
+    };
     const { client } = wired(envelope(401, body), { onAuthRequired: spy });
     const err = await client.call("/v1/models", {}, JWT).catch((e) => e);
     expect(spy).toHaveBeenCalledTimes(1);
@@ -792,7 +857,9 @@ describe("I7 — 2xx passthrough, streams intact", () => {
     const decoder = new TextDecoder();
     expect(decoder.decode(first.value)).toBe("data: one\n\n");
     // The stream is still open at this point — proves no buffering.
-    const stillOpen = (stream as unknown as { __closed: () => boolean }).__closed();
+    const stillOpen = (
+      stream as unknown as { __closed: () => boolean }
+    ).__closed();
     expect(stillOpen).toBe(false);
     reader.cancel();
   });
@@ -861,10 +928,13 @@ describe("parseCailError (standalone)", () => {
   });
   it("rejects the retired flat envelope", async () => {
     const err = await parseCailError(
-      new Response(JSON.stringify({ error: "quota_exceeded", message: "old shape" }), {
-        status: 429,
-        headers: { "content-type": "application/json" },
-      }),
+      new Response(
+        JSON.stringify({ error: "quota_exceeded", message: "old shape" }),
+        {
+          status: 429,
+          headers: { "content-type": "application/json" },
+        },
+      ),
     );
     expect(err.code).toBe("unknown_error");
   });
@@ -908,7 +978,10 @@ describe("I8 — canonical chat completions", () => {
   });
 
   it("V28 streaming Response passes through by reference, first chunk readable before close", async () => {
-    const stream = sseStream(["data: {\"choices\":[]}\n\n", "data: [DONE]\n\n"], 30);
+    const stream = sseStream(
+      ['data: {"choices":[]}\n\n', "data: [DONE]\n\n"],
+      30,
+    );
     const { client } = wired(stream);
     const resp = await client.chatCompletions(
       { model: "@cf/m/x", messages: [], stream: true },
@@ -918,9 +991,9 @@ describe("I8 — canonical chat completions", () => {
     const reader = resp.body!.getReader();
     const first = await reader.read();
     expect(new TextDecoder().decode(first.value)).toContain("choices");
-    expect(
-      (stream as unknown as { __closed: () => boolean }).__closed(),
-    ).toBe(false); // not buffered
+    expect((stream as unknown as { __closed: () => boolean }).__closed()).toBe(
+      false,
+    ); // not buffered
     reader.cancel();
   });
 
@@ -936,7 +1009,10 @@ describe("I8 — canonical chat completions", () => {
       client.chatCompletions({ model: "", messages: [] }, KEY),
     ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
     await expect(
-      client.chatCompletions({ model: "@cf/m/x", messages: "no" as unknown as unknown[] }, KEY),
+      client.chatCompletions(
+        { model: "@cf/m/x", messages: "no" as unknown as unknown[] },
+        KEY,
+      ),
     ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
     await expect(
       client.chatCompletions(
@@ -985,7 +1061,11 @@ describe("chatFetch — SDK adapter", () => {
     const { rec, client } = wired([
       envelope(
         429,
-        { error: "quota_exceeded", message: "over budget", retry_after_seconds: 120 },
+        {
+          error: "quota_exceeded",
+          message: "over budget",
+          retry_after_seconds: 120,
+        },
         { "retry-after": "120" },
       ),
       jsonOk({ never: "reached" }),
@@ -1006,7 +1086,10 @@ describe("chatFetch — SDK adapter", () => {
     const { rec, client } = wired(
       envelope(429, { error: "rate_limited", message: "slow down" }),
     );
-    const resp = await client.chatFetch(KEY)(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] }));
+    const resp = await client.chatFetch(KEY)(
+      CHAT_URL,
+      sdkInit({ model: "@cf/m/x", messages: [] }),
+    );
     expect(resp.status).toBe(429);
     expect(((await resp.json()) as any).error.code).toBe("rate_limited"); // body intact
     expect(rec.captured).toHaveLength(1);
@@ -1015,32 +1098,51 @@ describe("chatFetch — SDK adapter", () => {
   it("V32b raw semantics: 500 returned unretried; network error rethrown as-is", async () => {
     const { rec, client } = wired([nonJson(500, "boom"), jsonOk({})]);
     const fetchLike = client.chatFetch(KEY);
-    const resp = await fetchLike(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] }));
+    const resp = await fetchLike(
+      CHAT_URL,
+      sdkInit({ model: "@cf/m/x", messages: [] }),
+    );
     expect(resp.status).toBe(500);
     expect(rec.captured).toHaveLength(1);
 
     const netErr = wired({ networkError: true });
     await expect(
-      netErr.client.chatFetch(KEY)(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] })),
+      netErr.client.chatFetch(KEY)(
+        CHAT_URL,
+        sdkInit({ model: "@cf/m/x", messages: [] }),
+      ),
     ).rejects.toThrowError(TypeError); // platform error preserved, not CailError-wrapped
   });
 
   it("V33 401 fires onAuthRequired on a clone; SDK still receives a readable body", async () => {
     const seen: unknown[] = [];
     const { client } = wired(
-      envelope(401, { error: "authentication_required", message: "sign in", login_url: "/login" }),
+      envelope(401, {
+        error: "authentication_required",
+        message: "sign in",
+        login_url: "/login",
+      }),
       { onAuthRequired: (err) => void seen.push(err.code) },
     );
-    const resp = await client.chatFetch(JWT)(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] }));
+    const resp = await client.chatFetch(JWT)(
+      CHAT_URL,
+      sdkInit({ model: "@cf/m/x", messages: [] }),
+    );
     expect(resp.status).toBe(401);
     expect(seen).toEqual(["authentication_required"]);
-    expect(((await resp.json()) as any).error.code).toBe("authentication_required"); // body intact
+    expect(((await resp.json()) as any).error.code).toBe(
+      "authentication_required",
+    ); // body intact
   });
 
   it("V34 serves ONLY the chat-completions URL — anything else throws before fetch", async () => {
     const { rec, client } = wired(jsonOk({}));
     const fetchLike = client.chatFetch(KEY);
-    for (const bad of [`${BASE}/v1/run`, `${BASE}/v1/models`, "https://evil.example/v1/chat/completions"]) {
+    for (const bad of [
+      `${BASE}/v1/run`,
+      `${BASE}/v1/models`,
+      "https://evil.example/v1/chat/completions",
+    ]) {
       await expect(fetchLike(bad, sdkInit({}))).rejects.toMatchObject({
         code: "invalid_request",
         status: 0,
@@ -1051,10 +1153,16 @@ describe("chatFetch — SDK adapter", () => {
 
   it("V35 redirect protection still applies in raw mode (JWT never follows cross-origin)", async () => {
     const { client } = wired(
-      new Response(null, { status: 302, headers: { location: "https://evil.example/" } }),
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://evil.example/" },
+      }),
     );
     await expect(
-      client.chatFetch(JWT)(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] })),
+      client.chatFetch(JWT)(
+        CHAT_URL,
+        sdkInit({ model: "@cf/m/x", messages: [] }),
+      ),
     ).rejects.toMatchObject({ code: "unexpected_redirect" });
   });
 });
@@ -1110,7 +1218,10 @@ describe("I5 extension — generic call() never auto-retries a keyless non-idemp
   });
 
   it("POST with a caller key retries network errors too", async () => {
-    const { rec, client } = wired([{ networkError: true }, jsonOk({ ok: true })]);
+    const { rec, client } = wired([
+      { networkError: true },
+      jsonOk({ ok: true }),
+    ]);
     const resp = await client.call(
       "/keys",
       { method: "POST", headers: { "idempotency-key": "caller-key-2" } },
@@ -1282,7 +1393,12 @@ describe("backoff — full jitter (AWS Builders' Library) and RFC 9110 Retry-Aft
 
 describe("construction — baseUrl must parse as a URL", () => {
   it("garbage baseUrl throws invalid_config at construction, not network_error later", () => {
-    for (const bad of ["not a url", "example.com/api", "http://", "/relative"]) {
+    for (const bad of [
+      "not a url",
+      "example.com/api",
+      "http://",
+      "/relative",
+    ]) {
       let err: unknown = null;
       try {
         createCailClient({
@@ -1332,25 +1448,35 @@ describe("run() idempotency key — non-secure-context fallback + caller overrid
   });
 
   it("caller-supplied options.idempotencyKey reaches the wire and is stable across retries", async () => {
-    const { rec, client } = wired([{ networkError: true }, jsonOk({ ok: true })]);
+    const { rec, client } = wired([
+      { networkError: true },
+      jsonOk({ ok: true }),
+    ]);
     const resp = await client.run(
       { model: "@cf/m/x", input: { prompt: "hi" } },
       KEY,
-      { idempotencyKey: "app-restart-safe-key-1" },
+      { idempotencyKey: "11111111-1111-4111-8111-111111111111" },
     );
     expect(resp.status).toBe(200);
     expect(rec.captured).toHaveLength(2);
     expect(rec.captured[0]!.headers["idempotency-key"]).toBe(
-      "app-restart-safe-key-1",
+      "11111111-1111-4111-8111-111111111111",
     );
     expect(rec.captured[1]!.headers["idempotency-key"]).toBe(
-      "app-restart-safe-key-1",
+      "11111111-1111-4111-8111-111111111111",
     );
   });
 
   it("invalid options.idempotencyKey throws before fetch", async () => {
     const { rec, client } = wired(jsonOk({}));
-    for (const bad of ["", "has\r\ncontrols", "x".repeat(256)]) {
+    for (const bad of [
+      "",
+      "app-restart-safe-key-1",
+      "11111111-1111-1111-8111-111111111111",
+      "11111111-1111-4111-7111-111111111111",
+      "11111111-1111-4111-8111-11111111111g",
+      "11111111-1111-4111-8111-111111111111\r",
+    ]) {
       await expect(
         client.run({ model: "@cf/m/x", input: "hi" }, KEY, {
           idempotencyKey: bad,

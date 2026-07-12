@@ -136,11 +136,10 @@ export interface CailRunRequest {
 /** Options accepted by {@link CailClient.run} — the shared call options plus run-only knobs. */
 export interface CailRunOptions extends CailCallOptions {
     /**
-     * Caller-supplied `Idempotency-Key` for the buffered run (IETF
-     * draft-ietf-httpapi-idempotency-key-header). Lets an app dedupe the SAME
-     * logical run across its own restarts/timeouts, beyond the per-call UUID
-     * the client mints by default. Must be 1–255 characters with no control
-     * characters; reused verbatim on every retry attempt.
+     * Caller-supplied UUID v4 `Idempotency-Key` for the buffered run. Lets an
+     * app dedupe the SAME logical run across its own restarts/timeouts, beyond
+     * the per-call UUID v4 the client mints by default. Reused verbatim on every
+     * retry attempt; any non-UUID-v4 value is rejected before fetch.
      */
     idempotencyKey?: string;
 }

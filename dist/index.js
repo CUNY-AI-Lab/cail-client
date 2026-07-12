@@ -84,6 +84,7 @@ const POLLUTION_METADATA_KEYS = new Set([
 const MAX_METADATA_KEYS = 8;
 const MAX_METADATA_STRING_LEN = 128;
 const CREDENTIAL_CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/;
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const QUOTA_STATE_VALUES = new Set(["ok", "stale"]);
 const QUOTA_INTEGER_RE = /^\d+$/;
 function parseQuotaInteger(value) {
@@ -428,9 +429,7 @@ function quotaBodyUnknownError(status) {
 }
 function quotaBodyInteger(obj, key) {
     const value = obj[key];
-    if (typeof value !== "number" ||
-        !Number.isSafeInteger(value) ||
-        value < 0) {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
         return null;
     }
     return value;
@@ -570,9 +569,7 @@ export function createCailClient(opts) {
                 catch {
                     throw new CailError("invalid_metadata", "Existing X-CAIL-Metadata header is not valid JSON.", 0);
                 }
-                if (typeof base !== "object" ||
-                    base === null ||
-                    Array.isArray(base)) {
+                if (typeof base !== "object" || base === null || Array.isArray(base)) {
                     throw new CailError("invalid_metadata", "X-CAIL-Metadata must be a JSON object.", 0);
                 }
                 Object.assign(merged, base);
@@ -646,7 +643,8 @@ export function createCailClient(opts) {
                 if (internal?.raw === true)
                     throw err;
                 // Network/transport error (I5): retry up to maxRetries, else throw.
-                if ((internal?.modelRun !== true || internal?.idempotentModelRun === true) &&
+                if ((internal?.modelRun !== true ||
+                    internal?.idempotentModelRun === true) &&
                     retrySafeMethod &&
                     !hasNonReplayableBody &&
                     isRetriableNetworkError(err) &&
@@ -739,7 +737,8 @@ export function createCailClient(opts) {
             const is5xx = response.status >= 500 && response.status < 600;
             if (is5xx &&
                 shouldRetryHeader(response) !== false &&
-                (internal?.modelRun !== true || internal?.idempotentModelRun === true) &&
+                (internal?.modelRun !== true ||
+                    internal?.idempotentModelRun === true) &&
                 retrySafeMethod &&
                 retry5xx &&
                 !hasNonReplayableBody &&
@@ -793,10 +792,8 @@ export function createCailClient(opts) {
         }
         if (options?.idempotencyKey !== undefined &&
             (typeof options.idempotencyKey !== "string" ||
-                options.idempotencyKey.length === 0 ||
-                options.idempotencyKey.length > 255 ||
-                CREDENTIAL_CONTROL_CHAR_RE.test(options.idempotencyKey))) {
-            throw new CailError("invalid_request", "run() options.idempotencyKey must be a 1-255 character string with no control characters.", 0);
+                !UUID_V4_RE.test(options.idempotencyKey))) {
+            throw new CailError("invalid_request", "run() options.idempotencyKey must be a UUID v4.", 0);
         }
         let body;
         try {
@@ -848,7 +845,11 @@ export function createCailClient(opts) {
                 throw new CailError("invalid_request", `chatFetch() serves only POST ${target}; got ${String(url ?? input)}. ` +
                     "Point the SDK baseURL at `${baseUrl}/v1` so it derives /v1/chat/completions.", 0);
             }
-            return call("/v1/chat/completions", init ?? {}, credential, options, { modelRun: true, raw: true, retry5xx: false });
+            return call("/v1/chat/completions", init ?? {}, credential, options, {
+                modelRun: true,
+                raw: true,
+                retry5xx: false,
+            });
         };
     }
     return { run, chatCompletions, chatFetch, call, getQuota };

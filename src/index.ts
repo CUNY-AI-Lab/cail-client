@@ -62,8 +62,7 @@ export type { CailCorrelation, CailHeadersLike } from "@cuny-ai-lab/cail-log";
 
 /** Credential forwarded on a call. Exactly one kind reaches the wire (I1). */
 export type CailCredential =
-  | { kind: "jwt"; token: string }
-  | { kind: "key"; token: string };
+  { kind: "jwt"; token: string } | { kind: "key"; token: string };
 
 /** Per-call spend metadata (I3). Merged with any `X-CAIL-Metadata` in `init`. */
 export type CailMetadata = Record<string, string | number>;
@@ -171,11 +170,10 @@ export interface CailRunRequest {
 /** Options accepted by {@link CailClient.run} — the shared call options plus run-only knobs. */
 export interface CailRunOptions extends CailCallOptions {
   /**
-   * Caller-supplied `Idempotency-Key` for the buffered run (IETF
-   * draft-ietf-httpapi-idempotency-key-header). Lets an app dedupe the SAME
-   * logical run across its own restarts/timeouts, beyond the per-call UUID
-   * the client mints by default. Must be 1–255 characters with no control
-   * characters; reused verbatim on every retry attempt.
+   * Caller-supplied UUID v4 `Idempotency-Key` for the buffered run. Lets an
+   * app dedupe the SAME logical run across its own restarts/timeouts, beyond
+   * the per-call UUID v4 the client mints by default. Reused verbatim on every
+   * retry attempt; any non-UUID-v4 value is rejected before fetch.
    */
   idempotencyKey?: string;
 }
@@ -266,6 +264,8 @@ const POLLUTION_METADATA_KEYS = new Set([
 const MAX_METADATA_KEYS = 8;
 const MAX_METADATA_STRING_LEN = 128;
 const CREDENTIAL_CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/;
+const UUID_V4_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const QUOTA_STATE_VALUES = new Set(["ok", "stale"]);
 const QUOTA_INTEGER_RE = /^\d+$/;
 
@@ -637,7 +637,8 @@ export async function parseCailError(response: Response): Promise<CailError> {
       validParam &&
       validCail
     ) {
-      const extras: Record<string, unknown> = cail === undefined ? {} : { ...cail };
+      const extras: Record<string, unknown> =
+        cail === undefined ? {} : { ...cail };
       // Preserve Retry-After alongside the CAIL extension fields.
       addResponseMetadataExtras(response, extras);
       return new CailError(
@@ -675,11 +676,7 @@ function quotaBodyInteger(
   key: string,
 ): number | null {
   const value = obj[key];
-  if (
-    typeof value !== "number" ||
-    !Number.isSafeInteger(value) ||
-    value < 0
-  ) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     return null;
   }
   return value;
@@ -817,7 +814,12 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     init: RequestInit,
     credential: CailCredential,
     options?: CailCallOptions,
-    internal?: { retry5xx?: boolean; modelRun?: boolean; idempotentModelRun?: boolean; raw?: boolean },
+    internal?: {
+      retry5xx?: boolean;
+      modelRun?: boolean;
+      idempotentModelRun?: boolean;
+      raw?: boolean;
+    },
   ): Promise<Response> {
     if (
       (path === "/v1/run" || path === "/v1/chat/completions") &&
@@ -891,11 +893,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
             0,
           );
         }
-        if (
-          typeof base !== "object" ||
-          base === null ||
-          Array.isArray(base)
-        ) {
+        if (typeof base !== "object" || base === null || Array.isArray(base)) {
           throw new CailError(
             "invalid_metadata",
             "X-CAIL-Metadata must be a JSON object.",
@@ -979,7 +977,8 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         if (internal?.raw === true) throw err;
         // Network/transport error (I5): retry up to maxRetries, else throw.
         if (
-          (internal?.modelRun !== true || internal?.idempotentModelRun === true) &&
+          (internal?.modelRun !== true ||
+            internal?.idempotentModelRun === true) &&
           retrySafeMethod &&
           !hasNonReplayableBody &&
           isRetriableNetworkError(err) &&
@@ -1085,7 +1084,8 @@ export function createCailClient(opts: CailClientOptions): CailClient {
       if (
         is5xx &&
         shouldRetryHeader(response) !== false &&
-        (internal?.modelRun !== true || internal?.idempotentModelRun === true) &&
+        (internal?.modelRun !== true ||
+          internal?.idempotentModelRun === true) &&
         retrySafeMethod &&
         retry5xx &&
         !hasNonReplayableBody &&
@@ -1164,13 +1164,11 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     if (
       options?.idempotencyKey !== undefined &&
       (typeof options.idempotencyKey !== "string" ||
-        options.idempotencyKey.length === 0 ||
-        options.idempotencyKey.length > 255 ||
-        CREDENTIAL_CONTROL_CHAR_RE.test(options.idempotencyKey))
+        !UUID_V4_RE.test(options.idempotencyKey))
     ) {
       throw new CailError(
         "invalid_request",
-        "run() options.idempotencyKey must be a 1-255 character string with no control characters.",
+        "run() options.idempotencyKey must be a UUID v4.",
         0,
       );
     }
@@ -1266,13 +1264,11 @@ export function createCailClient(opts: CailClientOptions): CailClient {
           0,
         );
       }
-      return call(
-        "/v1/chat/completions",
-        init ?? {},
-        credential,
-        options,
-        { modelRun: true, raw: true, retry5xx: false },
-      );
+      return call("/v1/chat/completions", init ?? {}, credential, options, {
+        modelRun: true,
+        raw: true,
+        retry5xx: false,
+      });
     };
   }
 
