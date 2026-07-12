@@ -451,6 +451,40 @@ describe("I5 — retry policy", () => {
     expect(rec.captured[1]!.headers["idempotency-key"]).toBe(firstKey);
   });
 
+  it("buffered model POST retries an in-progress idempotency conflict", async () => {
+    const { rec, client } = wired([
+      envelope(
+        409,
+        { error: "idempotency_in_progress", message: "still running" },
+        { "retry-after": "0" },
+      ),
+      jsonOk({ ok: true }),
+    ]);
+
+    const response = await client.run(
+      { model: "@cf/m/x", input: { prompt: "hi" } },
+      KEY,
+    );
+
+    expect(response.status).toBe(200);
+    expect(rec.captured).toHaveLength(2);
+    expect(rec.captured[1]!.headers["idempotency-key"]).toBe(
+      rec.captured[0]!.headers["idempotency-key"],
+    );
+  });
+
+  it("does not retry an unrelated 409 on a buffered model POST", async () => {
+    const { rec, client } = wired([
+      envelope(409, { error: "conflict", message: "not retryable" }),
+      jsonOk({ ok: true }),
+    ]);
+
+    await expect(
+      client.run({ model: "@cf/m/x", input: { prompt: "hi" } }, KEY),
+    ).rejects.toMatchObject({ code: "conflict", status: 409 });
+    expect(rec.captured).toHaveLength(1);
+  });
+
   it("model POST 5xx is never retried without gateway idempotency", async () => {
     const { rec, client } = wired([
       envelope(503, { error: "server_error", message: "uncertain execution" }),

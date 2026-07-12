@@ -850,7 +850,34 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         return response;
       }
 
-      // I5 — retry policy: NEVER 4xx; retry 5xx up to maxRetries.
+      // A transport retry can reach the gateway while the original buffered
+      // request is still completing. Only this explicit idempotency conflict is
+      // retryable; ordinary 4xx responses remain final.
+      if (
+        response.status === 409 &&
+        internal?.idempotentModelRun === true &&
+        !hasNonReplayableBody &&
+        attempt < maxRetries
+      ) {
+        let conflict: CailError | null = null;
+        try {
+          conflict = await parseCailError(response.clone());
+        } catch {
+          // An unreadable conflict is handled as an ordinary non-2xx below.
+        }
+        if (conflict?.code === "idempotency_in_progress") {
+          try {
+            await response.body?.cancel();
+          } catch {
+            /* ignore */
+          }
+          await sleep(retryDelayMs(response, attempt), signal);
+          attempt++;
+          continue;
+        }
+      }
+
+      // I5 — retry policy: never other 4xx; retry 5xx up to maxRetries.
       const is5xx = response.status >= 500 && response.status < 600;
       if (
         is5xx &&
