@@ -144,7 +144,7 @@ export interface CailClient {
      */
     chatFetch(credential: CailCredential, options?: CailCallOptions): (input: string | URL, init?: RequestInit) => Promise<Response>;
     /**
-     * Call a non-model gateway endpoint such as `/models`, `/quota`, or key
+     * Call a non-model gateway endpoint such as `/v1/models`, `/quota`, or key
      * delegation. Model invocation belongs in {@link run} /
      * {@link chatCompletions}.
      *

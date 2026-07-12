@@ -129,12 +129,13 @@ their quota state.
 
 ## Other gateway endpoints
 
-`call()` remains available for non-model gateway endpoints such as `/models`
-and key delegation. Do not use it for model invocation.
+`call()` remains available for non-model gateway endpoints such as
+`/v1/models` and key delegation. Do not use it for model invocation. The
+gateway retains `/models` as an alias for older CAIL consumers.
 
 ```ts
 const response = await cail.call(
-  "/models",
+  "/v1/models",
   { method: "GET" },
   credential,
 );
