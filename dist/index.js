@@ -297,7 +297,15 @@ function isRecord(value) {
 function isReadableStreamBody(body) {
     return (typeof ReadableStream !== "undefined" && body instanceof ReadableStream);
 }
-function addRetryAfterExtra(response, extras) {
+function addResponseMetadataExtras(response, extras) {
+    const requestId = response.headers.get("x-request-id");
+    if (requestId !== null && !("request_id" in extras)) {
+        extras["request_id"] = requestId;
+    }
+    const shouldRetry = shouldRetryHeader(response);
+    if (shouldRetry !== null && !("should_retry" in extras)) {
+        extras["should_retry"] = shouldRetry;
+    }
     const retryAfter = response.headers.get("Retry-After");
     if (retryAfter !== null && !("retry_after" in extras)) {
         extras["retry_after"] = retryAfter;
@@ -346,13 +354,13 @@ export async function parseCailError(response) {
             validCail) {
             const extras = cail === undefined ? {} : { ...cail };
             // Preserve Retry-After alongside the CAIL extension fields.
-            addRetryAfterExtra(response, extras);
+            addResponseMetadataExtras(response, extras);
             return new CailError(error["code"], error["message"], status, extras, error["type"], param);
         }
     }
     // Non-JSON / shape-invalid body: NOT swallowed, NOT thrown away (I4).
     const extras = {};
-    addRetryAfterExtra(response, extras);
+    addResponseMetadataExtras(response, extras);
     return new CailError("unknown_error", `The CAIL backbone returned an unexpected response (status ${status}).`, status, extras);
 }
 function quotaBodyUnknownError(status) {

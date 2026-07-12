@@ -77,7 +77,7 @@ describe("C-A — correlation contract re-exported verbatim from cail-log", () =
 describe("C-B — options.correlation forwards the trace downstream", () => {
   it("C4 call() with correlation puts traceparent + X-CAIL-Request-Id on the wire", async () => {
     const { rec, client } = wired(jsonOk({ ok: true }));
-    await client.call("/models", { method: "GET" }, JWT, {
+    await client.call("/v1/models", { method: "GET" }, JWT, {
       correlation: CORR,
     });
     expect(rec.one.headers["traceparent"]).toBe(WIRE_TRACEPARENT);
@@ -119,7 +119,7 @@ describe("C-B — options.correlation forwards the trace downstream", () => {
 
   it("C8 backward compatible: no correlation option → no correlation headers on the wire", async () => {
     const { rec, client } = wired(jsonOk({ ok: true }));
-    await client.call("/models", { method: "GET" }, JWT);
+    await client.call("/v1/models", { method: "GET" }, JWT);
     expect(rec.one.headers["traceparent"]).toBeUndefined();
     expect(rec.one.headers["x-cail-request-id"]).toBeUndefined();
   });
@@ -127,7 +127,7 @@ describe("C-B — options.correlation forwards the trace downstream", () => {
   it("C9 the client's correlation overrides a stray caller-injected traceparent", async () => {
     const { rec, client } = wired(jsonOk({ ok: true }));
     await client.call(
-      "/models",
+      "/v1/models",
       {
         method: "GET",
         headers: {
@@ -150,7 +150,7 @@ describe("C-B — options.correlation forwards the trace downstream", () => {
       request_id: CORR.request_id,
     } as CailCorrelation;
     const err = await client
-      .call("/models", { method: "GET" }, JWT, { correlation: bad })
+      .call("/v1/models", { method: "GET" }, JWT, { correlation: bad })
       .then(() => null)
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CailError);
@@ -164,7 +164,7 @@ describe("C-B — options.correlation forwards the trace downstream", () => {
       envelope(503, { error: "overloaded", message: "try again" }),
       jsonOk({ ok: true }),
     ]);
-    await client.call("/models", { method: "GET" }, JWT, {
+    await client.call("/v1/models", { method: "GET" }, JWT, {
       correlation: CORR,
     });
     expect(rec.captured.length).toBe(2);

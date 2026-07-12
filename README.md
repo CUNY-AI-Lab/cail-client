@@ -6,7 +6,8 @@ spend-attribution headers, preserves quota information, and turns gateway
 error envelopes into typed errors. It works for independent CUNY applications
 and scripts as well as Kale and centrally hosted CAIL tools.
 
-It runs in browsers, Workers, and Node 20 or newer with no runtime dependencies.
+It runs in browsers, Workers, and Node 20 or newer. Its only runtime dependency
+is the shared `@cuny-ai-lab/cail-log` correlation primitive.
 
 ## Install
 
@@ -165,7 +166,9 @@ Tokens must be non-empty and contain no control characters.
 Non-success responses throw
 `CailError { code, type, param, message, status, extras }`. The parser accepts
 only the gateway's nested OpenAI-compatible error object; `extras` contains
-the optional `error.cail` fields. Gateway messages are preserved verbatim.
+the optional `error.cail` fields plus `request_id`, `should_retry`, and
+`retry_after` when their response headers are present and valid. Gateway
+messages are preserved verbatim.
 Each buffered `run()` call
 generates one UUID v4 `Idempotency-Key` before its retry loop and reuses it for
 every attempt, allowing safe network and 5xx retries through the gateway's
