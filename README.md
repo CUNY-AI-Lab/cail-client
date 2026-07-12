@@ -158,9 +158,12 @@ Tokens must be non-empty and contain no control characters.
 ## Errors and retries
 
 Non-success responses throw `CailError { code, message, status, extras }`.
-Gateway error messages are preserved verbatim. The client never retries 4xx,
-aborted requests, or requests with one-shot stream bodies. It retries network
-and 5xx failures up to `maxRetries` (default 2 when omitted). A present but
+Gateway error messages are preserved verbatim. Model POSTs (`run()` and
+`chatCompletions()`) are never retried until the gateway supports execution
+idempotency; a retry after an uncertain response could run and bill the model
+twice. The client also never retries 4xx, aborted requests, or requests with
+one-shot stream bodies. Non-model calls retry network and 5xx failures up to
+`maxRetries` (default 2 when omitted). A present but
 invalid `maxRetries` — anything other than a finite integer >= 0 — throws
 `invalid_config` at construction; invalid config is never silently coerced.
 

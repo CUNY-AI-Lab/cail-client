@@ -16,7 +16,9 @@
  *   - Optional `X-CAIL-Metadata` is validated and serialized as JSON (I3).
  *   - Non-2xx → a typed `CailError` with the envelope's `message` VERBATIM;
  *     a non-JSON error body is never swallowed as success (I4).
- *   - Never retry 4xx; retry 5xx + network up to `maxRetries` with backoff (I5).
+ *   - Never retry 4xx. Non-model calls retry 5xx + network up to `maxRetries`
+ *     with backoff; billed model POSTs make one attempt until the gateway
+ *     provides execution idempotency (I5).
  *   - `401 authentication_required` invokes `onAuthRequired`, then still throws
  *     (I6).
  *   - 2xx `Response` returned by reference, body NOT buffered (I7).
@@ -102,10 +104,11 @@ export interface CailClientOptions {
   /** Injectable fetch (tests / custom transports). Default: the global `fetch`. */
   fetchImpl?: typeof fetch;
   /**
-   * Max retries for 5xx + network errors (I5). Default 2 (when absent). Never
-   * applies to 4xx. A PRESENT value must be a finite integer >= 0 — anything
-   * else throws `invalid_config` at construction (fail loud, matching
-   * `baseUrl`/`app`/`fetchImpl`; invalid config is never silently coerced).
+   * Max retries for eligible non-model 5xx + network errors (I5). Default 2
+   * (when absent). Never applies to 4xx or billed model POSTs. A PRESENT value
+   * must be a finite integer >= 0 — anything else throws `invalid_config` at
+   * construction (fail loud, matching `baseUrl`/`app`/`fetchImpl`; invalid
+   * config is never silently coerced).
    */
   maxRetries?: number;
 }
@@ -774,6 +777,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         if (internal?.raw === true) throw err;
         // Network/transport error (I5): retry up to maxRetries, else throw.
         if (
+          internal?.modelRun !== true &&
           !hasNonReplayableBody &&
           isRetriableNetworkError(err) &&
           attempt < maxRetries
@@ -849,6 +853,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
       const is5xx = response.status >= 500 && response.status < 600;
       if (
         is5xx &&
+        internal?.modelRun !== true &&
         retry5xx &&
         !hasNonReplayableBody &&
         attempt < maxRetries

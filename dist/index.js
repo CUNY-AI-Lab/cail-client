@@ -16,7 +16,9 @@
  *   - Optional `X-CAIL-Metadata` is validated and serialized as JSON (I3).
  *   - Non-2xx → a typed `CailError` with the envelope's `message` VERBATIM;
  *     a non-JSON error body is never swallowed as success (I4).
- *   - Never retry 4xx; retry 5xx + network up to `maxRetries` with backoff (I5).
+ *   - Never retry 4xx. Non-model calls retry 5xx + network up to `maxRetries`
+ *     with backoff; billed model POSTs make one attempt until the gateway
+ *     provides execution idempotency (I5).
  *   - `401 authentication_required` invokes `onAuthRequired`, then still throws
  *     (I6).
  *   - 2xx `Response` returned by reference, body NOT buffered (I7).
@@ -500,7 +502,8 @@ export function createCailClient(opts) {
                 if (internal?.raw === true)
                     throw err;
                 // Network/transport error (I5): retry up to maxRetries, else throw.
-                if (!hasNonReplayableBody &&
+                if (internal?.modelRun !== true &&
+                    !hasNonReplayableBody &&
                     isRetriableNetworkError(err) &&
                     attempt < maxRetries) {
                     await sleep(backoffDelayMs(attempt), signal);
@@ -563,6 +566,7 @@ export function createCailClient(opts) {
             // I5 — retry policy: NEVER 4xx; retry 5xx up to maxRetries.
             const is5xx = response.status >= 500 && response.status < 600;
             if (is5xx &&
+                internal?.modelRun !== true &&
                 retry5xx &&
                 !hasNonReplayableBody &&
                 attempt < maxRetries) {

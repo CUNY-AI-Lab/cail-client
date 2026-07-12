@@ -436,6 +436,29 @@ describe("I5 — retry policy", () => {
     expect(rec.captured).toHaveLength(3); // 1 + 2 retries
   });
 
+  it("model POST network loss is never retried without gateway idempotency", async () => {
+    const { rec, client } = wired([{ networkError: true }, jsonOk({ ok: true })]);
+
+    await expect(
+      client.run({ model: "@cf/m/x", input: { prompt: "hi" } }, KEY),
+    ).rejects.toMatchObject({ code: "network_error", status: 0 });
+
+    expect(rec.captured).toHaveLength(1);
+  });
+
+  it("model POST 5xx is never retried without gateway idempotency", async () => {
+    const { rec, client } = wired([
+      envelope(503, { error: "server_error", message: "uncertain execution" }),
+      jsonOk({ ok: true }),
+    ]);
+
+    await expect(
+      client.chatCompletions({ model: "@cf/m/x", messages: [] }, KEY),
+    ).rejects.toMatchObject({ code: "server_error", status: 503 });
+
+    expect(rec.captured).toHaveLength(1);
+  });
+
   it("V23c present-but-invalid maxRetries throws invalid_config at construction (never silently coerced)", () => {
     for (const bad of [
       NaN,
