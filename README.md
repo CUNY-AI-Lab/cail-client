@@ -213,7 +213,7 @@ same-origin login redirect.
 bun install
 bun run typecheck
 bun run build
-bun test
+bun run test
 ```
 
 The tests use a recording fetch mock to assert outgoing URLs, headers, methods,
