@@ -30,7 +30,7 @@
     "prepare": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@cuny-ai-lab/cail-log": "github:CUNY-AI-Lab/cail-log#95b45c429c05e42557143ddfc1ff8afaf5b7b1c1"
+    "@cuny-ai-lab/cail-log": "github:CUNY-AI-Lab/cail-log#95b45c4"
   },
   "devDependencies": {
     "@types/node": "^20.17.6",
