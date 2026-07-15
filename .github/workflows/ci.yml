@@ -24,5 +24,13 @@ jobs:
       - name: Build
         run: bun run build
 
+      - name: Verify committed build matches source
+        run: |
+          git diff --exit-code -- dist
+          test -z "$(git status --porcelain --untracked-files=all -- dist)"
+
+      - name: Verify package contents
+        run: bun pm pack --dry-run
+
       - name: Test
-        run: bun test
+        run: bun run test

@@ -3,12 +3,11 @@
  *
  * The consumer-side twin of `@cuny-ai-lab/cail-identity`: the one library CUNY
  * applications use to *call* the model proxy correctly. It owns the credential
- * / header / error / retry contract from `docs/INTEGRATION.md` §1–2 so no
+ * / header / error / retry contract so no
  * application re-derives them. Consumers include independent CUNY apps and
  * scripts, Kale apps, and centrally hosted CAIL tools.
  *
- * Design contract (see README + CAIL_CLIENT_PRIMITIVE_SPEC.md, invariants
- * I1–I9):
+ * Design contract (see README, invariants I1–I9):
  *   - Pure Web-standard `fetch`/`Request`/`Response` — runs unchanged in the
  *     browser, Cloudflare Workers, and Node >=20. No SDK deps.
  *   - Exactly ONE credential reaches the wire (I1): the JWT path strips any
@@ -27,16 +26,16 @@
  *     buffered `POST /v1/run` `{model,input}` and OpenAI-shaped
  *     `POST /v1/chat/completions` (streaming-capable — the 2xx `Response`
  *     passes through by reference per I7, so SSE flows untouched).
- *     `chatFetch()` adapts the chat endpoint for OpenAI-style SDKs with raw
- *     fetch semantics (non-2xx returned, not thrown; no client-side retries —
- *     the SDK owns those).
+ *     `chatFetch()` adapts the chat endpoint for OpenAI-style SDKs without
+ *     adding client-side retries. Gateway-declared non-retryable errors throw
+ *     by default so SDK status heuristics cannot replay an ambiguous request.
  *   - Quota headers are advisory and all-or-none: absent/malformed quota
  *     headers mean "meter unavailable", never a client error (I9).
  *
- * The public surface is `string`/`number`/plain-object/`Response` only — no
- * ambient platform (`DOM`/Workers) types leak out of the `.d.ts`.
+ * The public surface uses Web-standard fetch, Request, Response, and
+ * AbortSignal types supported by browsers, Workers, and Node >=20.
  */
-import { outboundCorrelationHeaders, TRACEPARENT_HEADER, CAIL_REQUEST_ID_HEADER, } from "@cuny-ai-lab/cail-log";
+import { outboundCorrelationHeaders, TRACEPARENT_HEADER, TRACESTATE_HEADER, CAIL_REQUEST_ID_HEADER, } from "@cuny-ai-lab/cail-log";
 /**
  * The fleet correlation contract, re-exported VERBATIM from
  * `@cuny-ai-lab/cail-log` so consumers have one source of truth where their
@@ -45,7 +44,7 @@ import { outboundCorrelationHeaders, TRACEPARENT_HEADER, CAIL_REQUEST_ID_HEADER,
  * {@link outboundCorrelationHeaders} (or by passing `correlation` in
  * {@link CailCallOptions} and letting the client attach the headers).
  */
-export { correlationFromHeaders, outboundCorrelationHeaders, TRACEPARENT_HEADER, CAIL_REQUEST_ID_HEADER, } from "@cuny-ai-lab/cail-log";
+export { correlationFromHeaders, outboundCorrelationHeaders, TRACEPARENT_HEADER, TRACESTATE_HEADER, CAIL_REQUEST_ID_HEADER, } from "@cuny-ai-lab/cail-log";
 /**
  * A typed CAIL backbone error. Thrown by `call()` on any non-2xx response (I4)
  * and on retry exhaustion (I5). `message` is the envelope's `message` verbatim
@@ -486,20 +485,46 @@ export function createCailClient(opts) {
     if (typeof opts.baseUrl !== "string" || opts.baseUrl.length === 0) {
         throw new CailError("invalid_config", "createCailClient requires a non-empty `baseUrl`.", 0);
     }
-    // Fail loud at construction on a garbage base URL (same posture as `app` /
-    // `maxRetries`): otherwise it only surfaces later, per call, disguised as a
-    // `network_error`.
+    if (opts.baseUrl.trim() !== opts.baseUrl ||
+        CREDENTIAL_CONTROL_CHAR_RE.test(opts.baseUrl)) {
+        throw new CailError("invalid_config", "`baseUrl` must not contain surrounding whitespace or control characters.", 0);
+    }
+    for (const [name, value] of [
+        ["allowInsecureLoopback", opts.allowInsecureLoopback],
+        ["allowAmbientCredentials", opts.allowAmbientCredentials],
+    ]) {
+        if (value !== undefined && typeof value !== "boolean") {
+            throw new CailError("invalid_config", `\`${name}\` must be a boolean when present.`, 0);
+        }
+    }
+    let parsedBaseUrl;
     try {
-        new URL(opts.baseUrl);
+        parsedBaseUrl = new URL(opts.baseUrl);
     }
     catch {
-        throw new CailError("invalid_config", `createCailClient requires an absolute \`baseUrl\` URL; ${JSON.stringify(opts.baseUrl)} does not parse (new URL threw).`, 0);
+        throw new CailError("invalid_config", "createCailClient requires an absolute HTTPS `baseUrl` URL.", 0);
+    }
+    if (parsedBaseUrl.username !== "" || parsedBaseUrl.password !== "") {
+        throw new CailError("invalid_config", "`baseUrl` must not contain embedded credentials.", 0);
+    }
+    if (parsedBaseUrl.search !== "" || parsedBaseUrl.hash !== "") {
+        throw new CailError("invalid_config", "`baseUrl` must not contain a query string or fragment.", 0);
+    }
+    const secureProtocol = parsedBaseUrl.protocol === "https:";
+    const exactLoopbackHttp = /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?(?:\/|$)/i.test(opts.baseUrl);
+    const allowedLoopbackHttp = parsedBaseUrl.protocol === "http:" &&
+        opts.allowInsecureLoopback === true &&
+        exactLoopbackHttp;
+    if (!secureProtocol && !allowedLoopbackHttp) {
+        throw new CailError("invalid_config", "`baseUrl` must use HTTPS. Plaintext HTTP is allowed only for an exact loopback host when `allowInsecureLoopback` is true.", 0);
     }
     if (typeof opts.app !== "string" || !APP_SLUG_RE.test(opts.app)) {
         throw new CailError("invalid_config", `Invalid X-CAIL-App slug ${JSON.stringify(opts.app)}: must match /^[a-z0-9][a-z0-9-]{0,63}$/ (low-cardinality, per-tool).`, 0);
     }
     const app = opts.app;
-    const baseUrl = opts.baseUrl.replace(/\/+$/, "");
+    const normalizedPath = parsedBaseUrl.pathname.replace(/\/+$/, "");
+    const baseUrl = `${parsedBaseUrl.origin}${normalizedPath}`;
+    const allowAmbientCredentials = opts.allowAmbientCredentials === true;
     const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
     if (typeof fetchImpl !== "function") {
         throw new CailError("invalid_config", "No `fetch` available: pass `fetchImpl` in this runtime.", 0);
@@ -536,7 +561,23 @@ export function createCailClient(opts) {
             CREDENTIAL_CONTROL_CHAR_RE.test(credential.token)) {
             throw new CailError("invalid_credential", "Credential token must be non-empty and contain no control characters.", 0);
         }
+        if (credential.kind === "key" &&
+            (!credential.token.startsWith("sk-cail-") ||
+                credential.token.length === "sk-cail-".length)) {
+            throw new CailError("invalid_credential", "Key credential must be a non-empty CAIL-issued key.", 0);
+        }
+        if (options?.retryNonIdempotent !== undefined &&
+            typeof options.retryNonIdempotent !== "boolean") {
+            throw new CailError("invalid_request", "`retryNonIdempotent` must be a boolean when present.", 0);
+        }
         const headers = toHeaderRecord(init.headers);
+        if (!allowAmbientCredentials) {
+            const hasCookie = Object.keys(headers).some((key) => key.toLowerCase() === "cookie");
+            if (hasCookie ||
+                (init.credentials !== undefined && init.credentials !== "omit")) {
+                throw new CailError("invalid_request", "Ambient credentials are disabled. Remove Cookie/credential inclusion or construct the client with `allowAmbientCredentials: true` after reviewing the gateway boundary.", 0);
+            }
+        }
         // I1 — exactly one credential on the wire.
         if (credential.kind === "jwt") {
             // Strip ANY Authorization the caller/SDK injected (the dummy-bearer
@@ -582,8 +623,9 @@ export function createCailClient(opts) {
         if (merged !== undefined) {
             headers["X-CAIL-Metadata"] = serializeMetadata(merged);
         }
-        // Optional correlation forwarding (the cail-log contract): attach
-        // `traceparent` + `X-CAIL-Request-Id` so the next hop can ADOPT this
+        // Optional correlation forwarding (the cail-log contract): replace the
+        // traceparent/tracestate/request-id carrier as one unit so the next hop can
+        // ADOPT this
         // trace. Applied once, before any transport attempt — retries of the same
         // logical request deliberately carry the same correlation. Absent → no
         // headers added, no behavior change.
@@ -598,35 +640,55 @@ export function createCailClient(opts) {
                 // client's error vocabulary, client-side (status 0), nothing on the wire.
                 throw new CailError("invalid_correlation", err instanceof Error && err.message
                     ? err.message
-                    : "Invalid correlation: expected { trace_id, span_id, request_id } from correlationFromHeaders().", 0);
+                    : "Invalid correlation: expected { trace_id, span_id, trace_flags, request_id } from correlationFromHeaders().", 0);
             }
             deleteHeaderCI(headers, TRACEPARENT_HEADER);
+            deleteHeaderCI(headers, TRACESTATE_HEADER);
             deleteHeaderCI(headers, CAIL_REQUEST_ID_HEADER);
             Object.assign(headers, correlationHeaders);
         }
         const url = `${baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
         // I8 — body + model forwarded verbatim: we never touch init.body.
-        const signal = init.signal;
+        const signal = options?.signal ?? init.signal;
+        if (signal != null &&
+            (typeof signal !== "object" ||
+                typeof signal.aborted !== "boolean" ||
+                typeof signal.addEventListener !== "function" ||
+                typeof signal.removeEventListener !== "function")) {
+            throw new CailError("invalid_request", "`signal` must be an AbortSignal when present.", 0);
+        }
         const hasNonReplayableBody = isReadableStreamBody(init.body);
         const retry5xx = internal?.retry5xx !== false;
-        // Retry safety for the generic path: a non-idempotent method (POST/PATCH —
-        // MDN "Idempotent") is only retried when an `Idempotency-Key` travels with
-        // the request (caller-supplied here, or minted by run()), per Stripe's
-        // idempotent-requests contract and IETF
-        // draft-ietf-httpapi-idempotency-key-header. Without a key, a network/5xx
-        // retry of e.g. `POST /keys` could duplicate the side effect. Idempotent
-        // methods (GET/HEAD/PUT/DELETE) retry as before. The billed model paths
-        // keep their own stricter gate (`modelRun`/`idempotentModelRun`) below.
+        // Retry safety for the generic path: a non-idempotent endpoint requires
+        // BOTH a non-empty Idempotency-Key and an explicit assertion that the
+        // endpoint implements durable claim/replay. A key cannot create server-side
+        // semantics. run() supplies its stronger internal gateway contract.
         const method = (init.method ?? "GET").toUpperCase();
         let wireIdempotencyKey;
         for (const key of Object.keys(headers)) {
-            if (key.toLowerCase() === "idempotency-key" && headers[key].length > 0) {
+            if (key.toLowerCase() === "idempotency-key" &&
+                headers[key].trim().length > 0) {
                 wireIdempotencyKey = headers[key];
                 break;
             }
         }
-        const retrySafeMethod = IDEMPOTENT_HTTP_METHODS.has(method) || wireIdempotencyKey !== undefined;
-        const requestInit = { ...init, headers, redirect: "manual" };
+        const methodIsIdempotent = IDEMPOTENT_HTTP_METHODS.has(method);
+        if (!methodIsIdempotent &&
+            internal?.idempotentModelRun !== true &&
+            options?.retryNonIdempotent === true &&
+            wireIdempotencyKey === undefined) {
+            throw new CailError("invalid_request", "`retryNonIdempotent: true` requires a non-empty Idempotency-Key header.", 0);
+        }
+        const retrySafeMethod = methodIsIdempotent ||
+            internal?.idempotentModelRun === true ||
+            (options?.retryNonIdempotent === true && wireIdempotencyKey !== undefined);
+        const requestInit = {
+            ...init,
+            headers,
+            redirect: "manual",
+            signal,
+            credentials: allowAmbientCredentials ? init.credentials : "omit",
+        };
         let attempt = 0;
         // Total tries = 1 + maxRetries.
         for (;;) {
@@ -637,11 +699,15 @@ export function createCailClient(opts) {
             catch (err) {
                 if (signal?.aborted)
                     throw err;
-                // Raw mode (chatFetch): preserve fetch semantics — the SDK recognizes
-                // its platform's own network errors; a CailError wrap would not be
-                // retried by it. No client-side retry either (the SDK owns those).
-                if (internal?.raw === true)
+                // chatFetch never retries. Its default mode wraps an ambiguous network
+                // failure in CailError so status-based SDK retry logic cannot replay it.
+                // Explicit return mode leaves the platform error to an SDK whose retry
+                // contract the caller has reviewed.
+                if (internal?.rawMode === "return")
                     throw err;
+                if (internal?.rawMode === "throw") {
+                    throw new CailError("network_error", "Network request to the CAIL backbone failed.", 0);
+                }
                 // Network/transport error (I5): retry up to maxRetries, else throw.
                 if ((internal?.modelRun !== true ||
                     internal?.idempotentModelRun === true) &&
@@ -653,9 +719,7 @@ export function createCailClient(opts) {
                     attempt++;
                     continue;
                 }
-                throw new CailError("network_error", err instanceof Error && err.message
-                    ? err.message
-                    : "Network request to the CAIL backbone failed.", 0);
+                throw new CailError("network_error", "Network request to the CAIL backbone failed.", 0);
             }
             // A redirect from the proxy is never a valid model-proxy response. With
             // redirect:"manual" the platform surfaces it as an opaque redirect
@@ -670,39 +734,42 @@ export function createCailClient(opts) {
             if (response.status >= 200 && response.status < 300) {
                 return response;
             }
-            // Raw mode (chatFetch): non-2xx is RETURNED, not thrown — the SDK parses
-            // provider error bodies and owns retry/backoff. The 401 hook (I6) still
-            // fires so browser tools can bounce to login; it inspects a CLONE so the
-            // body the SDK reads stays intact.
-            //
-            // ONE carve-out: a 429 `quota_exceeded` envelope THROWS the CailError
-            // instead. AI SDKs treat any 429 Response as retryable, but a CAIL quota
-            // 429 resets on a budget window, not a rate blip — retrying it can only
-            // burn attempts and then bury the envelope inside the SDK's RetryError
-            // (the fleet's known quota-surfacing bug). A thrown CailError is not a
-            // type any SDK retries, so the verbatim quota message (with
-            // extras.retry_after_seconds) surfaces on the first failure.
-            if (internal?.raw === true) {
-                if (response.status === 401 && onAuthRequired) {
-                    try {
-                        const peek = await parseCailError(response.clone());
-                        if (peek.code === "authentication_required")
-                            onAuthRequired(peek);
-                    }
-                    catch {
-                        // Advisory only; never mask the response.
-                    }
-                }
-                if (response.status === 429) {
-                    let peek = null;
+            // chatFetch never retries. It returns ordinary provider errors for the
+            // SDK parser, but by default throws gateway-declared non-retryable errors
+            // so an SDK's status-only heuristic cannot replay an ambiguous request.
+            // The explicit return mode is only for SDKs that honor x-should-retry.
+            if (internal?.rawMode !== undefined) {
+                const shouldRetry = shouldRetryHeader(response);
+                let peek = null;
+                if (response.status === 401 ||
+                    response.status === 429 ||
+                    shouldRetry === false) {
                     try {
                         peek = await parseCailError(response.clone());
                     }
                     catch {
-                        // Unreadable 429 body: return it raw.
+                        // A malformed body is parsed from the original only if we must throw.
                     }
-                    if (peek?.code === "quota_exceeded")
-                        throw peek;
+                }
+                if (response.status === 401 &&
+                    peek?.code === "authentication_required" &&
+                    onAuthRequired) {
+                    try {
+                        onAuthRequired(peek);
+                    }
+                    catch {
+                        // The hook is advisory; it must never mask the gateway result.
+                    }
+                }
+                const quotaExceeded = response.status === 429 && peek?.code === "quota_exceeded";
+                if (quotaExceeded) {
+                    if (internal.rawMode === "return" && shouldRetry === false) {
+                        return response;
+                    }
+                    throw peek;
+                }
+                if (shouldRetry === false && internal.rawMode === "throw") {
+                    throw peek ?? (await parseCailError(response));
                 }
                 return response;
             }
@@ -834,20 +901,75 @@ export function createCailClient(opts) {
         }, credential, options, { modelRun: true });
     }
     function chatFetch(credential, options) {
+        const rawMode = options?.nonRetryableErrorMode ?? "throw";
+        if (rawMode !== "throw" && rawMode !== "return") {
+            throw new CailError("invalid_request", '`chatFetch()` nonRetryableErrorMode must be "throw" or "return".', 0);
+        }
         const target = `${baseUrl}/v1/chat/completions`;
+        const canonicalTarget = new URL(target).href;
         return async (input, init) => {
-            const url = typeof input === "string"
-                ? input
-                : input instanceof URL
-                    ? input.href
-                    : undefined;
-            if (url !== target) {
-                throw new CailError("invalid_request", `chatFetch() serves only POST ${target}; got ${String(url ?? input)}. ` +
-                    "Point the SDK baseURL at `${baseUrl}/v1` so it derives /v1/chat/completions.", 0);
+            let url;
+            let requestInit;
+            const requestLike = typeof input === "object" &&
+                input !== null &&
+                "url" in input &&
+                typeof input.url === "string";
+            if (requestLike) {
+                if (typeof Request === "undefined") {
+                    throw new CailError("invalid_request", "This runtime cannot adapt a Request input.", 0);
+                }
+                let request;
+                try {
+                    request = new Request(input, init);
+                }
+                catch {
+                    throw new CailError("invalid_request", "chatFetch() received an invalid or already-consumed Request.", 0);
+                }
+                url = request.url;
+                requestInit = {
+                    method: request.method,
+                    headers: request.headers,
+                    body: request.body,
+                    cache: request.cache,
+                    credentials: request.credentials === "same-origin"
+                        ? undefined
+                        : request.credentials,
+                    integrity: request.integrity,
+                    keepalive: request.keepalive,
+                    mode: request.mode,
+                    redirect: request.redirect,
+                    referrer: request.referrer,
+                    referrerPolicy: request.referrerPolicy,
+                    signal: request.signal,
+                };
+                if (request.body !== null) {
+                    requestInit.duplex = "half";
+                }
             }
-            return call("/v1/chat/completions", init ?? {}, credential, options, {
+            else if (typeof input === "string") {
+                url = input;
+                requestInit = init ?? {};
+            }
+            else {
+                url = String(input);
+                requestInit = init ?? {};
+            }
+            let canonicalInput;
+            try {
+                canonicalInput = new URL(url).href;
+            }
+            catch {
+                throw new CailError("invalid_request", "chatFetch() requires the configured chat-completions URL.", 0);
+            }
+            if (canonicalInput !== canonicalTarget) {
+                throw new CailError("invalid_request", "chatFetch() serves only the configured POST /v1/chat/completions endpoint.", 0);
+            }
+            if ((requestInit.method ?? "GET").toUpperCase() !== "POST") {
+                throw new CailError("invalid_request", "chatFetch() requires method POST.", 0);
+            }
+            return call("/v1/chat/completions", requestInit, credential, options, {
                 modelRun: true,
-                raw: true,
+                rawMode,
                 retry5xx: false,
             });
         };

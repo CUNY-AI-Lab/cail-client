@@ -27,10 +27,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prepublishOnly": "bun run build",
-    "prepare": "tsc -p tsconfig.build.json"
+    "prepare": "bun run build"
   },
   "dependencies": {
-    "@cuny-ai-lab/cail-log": "github:CUNY-AI-Lab/cail-log#95b45c4"
+    "@cuny-ai-lab/cail-log": "github:CUNY-AI-Lab/cail-log#75e0dda3068794ae1543e1e2bb98c9c920bb848f"
   },
   "devDependencies": {
     "@types/node": "^20.17.6",

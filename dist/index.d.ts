@@ -3,12 +3,11 @@
  *
  * The consumer-side twin of `@cuny-ai-lab/cail-identity`: the one library CUNY
  * applications use to *call* the model proxy correctly. It owns the credential
- * / header / error / retry contract from `docs/INTEGRATION.md` §1–2 so no
+ * / header / error / retry contract so no
  * application re-derives them. Consumers include independent CUNY apps and
  * scripts, Kale apps, and centrally hosted CAIL tools.
  *
- * Design contract (see README + CAIL_CLIENT_PRIMITIVE_SPEC.md, invariants
- * I1–I9):
+ * Design contract (see README, invariants I1–I9):
  *   - Pure Web-standard `fetch`/`Request`/`Response` — runs unchanged in the
  *     browser, Cloudflare Workers, and Node >=20. No SDK deps.
  *   - Exactly ONE credential reaches the wire (I1): the JWT path strips any
@@ -27,14 +26,14 @@
  *     buffered `POST /v1/run` `{model,input}` and OpenAI-shaped
  *     `POST /v1/chat/completions` (streaming-capable — the 2xx `Response`
  *     passes through by reference per I7, so SSE flows untouched).
- *     `chatFetch()` adapts the chat endpoint for OpenAI-style SDKs with raw
- *     fetch semantics (non-2xx returned, not thrown; no client-side retries —
- *     the SDK owns those).
+ *     `chatFetch()` adapts the chat endpoint for OpenAI-style SDKs without
+ *     adding client-side retries. Gateway-declared non-retryable errors throw
+ *     by default so SDK status heuristics cannot replay an ambiguous request.
  *   - Quota headers are advisory and all-or-none: absent/malformed quota
  *     headers mean "meter unavailable", never a client error (I9).
  *
- * The public surface is `string`/`number`/plain-object/`Response` only — no
- * ambient platform (`DOM`/Workers) types leak out of the `.d.ts`.
+ * The public surface uses Web-standard fetch, Request, Response, and
+ * AbortSignal types supported by browsers, Workers, and Node >=20.
  */
 import { type CailCorrelation } from "@cuny-ai-lab/cail-log";
 /**
@@ -45,8 +44,8 @@ import { type CailCorrelation } from "@cuny-ai-lab/cail-log";
  * {@link outboundCorrelationHeaders} (or by passing `correlation` in
  * {@link CailCallOptions} and letting the client attach the headers).
  */
-export { correlationFromHeaders, outboundCorrelationHeaders, TRACEPARENT_HEADER, CAIL_REQUEST_ID_HEADER, } from "@cuny-ai-lab/cail-log";
-export type { CailCorrelation, CailHeadersLike } from "@cuny-ai-lab/cail-log";
+export { correlationFromHeaders, outboundCorrelationHeaders, TRACEPARENT_HEADER, TRACESTATE_HEADER, CAIL_REQUEST_ID_HEADER, } from "@cuny-ai-lab/cail-log";
+export type { CailCorrelation, CailCorrelationOptions, CailHeadersLike, } from "@cuny-ai-lab/cail-log";
 /** Credential forwarded on a call. Exactly one kind reaches the wire (I1). */
 export type CailCredential = {
     kind: "jwt";
@@ -55,7 +54,7 @@ export type CailCredential = {
     kind: "key";
     token: string;
 };
-/** Per-call spend metadata (I3). Merged with any `X-CAIL-Metadata` in `init`. */
+/** Optional per-call metadata (I3). Merged with any `X-CAIL-Metadata` in `init`. */
 export type CailMetadata = Record<string, string | number>;
 /** Advisory quota meter carried on model-proxy responses (I9). */
 export interface CailQuota {
@@ -91,7 +90,7 @@ export declare class CailError extends Error {
     constructor(code: string, message: string, status: number, extras?: Record<string, unknown>, type?: string, param?: string | null);
 }
 export interface CailClientOptions {
-    /** CAIL_API_BASE, e.g. `https://api.…` — no trailing slash (trailing slashes are trimmed). */
+    /** Trusted CAIL_API_BASE. HTTPS is required and trailing slashes are normalized. */
     baseUrl: string;
     /** X-CAIL-App slug — validated at construction against `/^[a-z0-9][a-z0-9-]{0,63}$/`. */
     app: string;
@@ -104,6 +103,16 @@ export interface CailClientOptions {
     /** Injectable fetch (tests / custom transports). Default: the global `fetch`. */
     fetchImpl?: typeof fetch;
     /**
+     * Allow plaintext HTTP only for the exact loopback hosts `localhost`,
+     * `127.0.0.1`, and `[::1]`. Default false.
+     */
+    allowInsecureLoopback?: boolean;
+    /**
+     * Permit caller-supplied Cookie headers and fetch credential modes other
+     * than `omit`. Default false; use only for an explicitly reviewed gateway.
+     */
+    allowAmbientCredentials?: boolean;
+    /**
      * Max retries for eligible non-model and idempotency-keyed buffered model
      * 5xx + network errors (I5). Default 2. Never applies to 4xx, streaming
      * model POSTs, or generic non-idempotent calls (POST/PATCH) that carry no
@@ -115,18 +124,36 @@ export interface CailClientOptions {
     maxRetries?: number;
 }
 export interface CailCallOptions {
-    /** Per-call spend metadata (I3), merged over any `X-CAIL-Metadata` already in `init.headers`. */
+    /** Per-call metadata (I3), merged over any `X-CAIL-Metadata` already in `init.headers`. */
     metadata?: CailMetadata;
     /**
      * Optional correlation to forward downstream (the cail-log contract). When
-     * present, the client attaches `traceparent` + `X-CAIL-Request-Id` via
+     * present, the client attaches `traceparent` (including `trace_flags`) plus
+     * `X-CAIL-Request-Id` and optional `tracestate` via
      * `outboundCorrelationHeaders(correlation)` so the gateway/Workers can adopt
      * the trace. Typically obtained from `correlationFromHeaders(request)` at
-     * the consuming app's own request boundary. Absent → no correlation headers
-     * are added (no behavior change). A malformed value throws a `CailError`
-     * (code `"invalid_correlation"`, status 0) before anything hits the wire.
+     * the consuming app's own request boundary. Request IDs are lowercase UUID
+     * v4 values. Absent → no correlation headers are added. A malformed value
+     * throws a `CailError` (code `"invalid_correlation"`, status 0) before
+     * anything hits the wire.
      */
     correlation?: CailCorrelation;
+    /** Abort the transport. This option takes precedence over `init.signal`. */
+    signal?: AbortSignal;
+    /**
+     * Opt a generic non-idempotent endpoint into network/5xx retries. A
+     * non-empty `Idempotency-Key` header is also required. The endpoint must
+     * document durable claim/replay semantics; a key alone is insufficient.
+     */
+    retryNonIdempotent?: boolean;
+}
+export interface CailChatFetchOptions extends CailCallOptions {
+    /**
+     * `"throw"` (default) converts gateway-declared non-retryable responses to
+     * `CailError`, suitable for SDKs that otherwise retry by status. `"return"`
+     * preserves those responses for SDKs that honor `x-should-retry: false`.
+     */
+    nonRetryableErrorMode?: "throw" | "return";
 }
 /** The canonical model request accepted by `POST /v1/run`. */
 export interface CailRunRequest {
@@ -171,14 +198,15 @@ export interface CailClient {
     /**
      * Build a `fetch`-shaped adapter for OpenAI-style SDKs (e.g. the Vercel AI
      * SDK's `createOpenAICompatible({ fetch })`): it enforces the credential /
-     * app / metadata discipline (I1–I3) and the redirect protection, but keeps
-     * RAW FETCH SEMANTICS — non-2xx responses are returned (not thrown) and the
-     * client never retries (the SDK owns retry policy). It serves ONLY
+     * app / metadata discipline (I1–I3) and redirect protection. It never
+     * retries. Non-2xx responses remain raw unless the gateway declares them
+     * non-retryable (or they are quota exhaustion), in which case the default
+     * adapter throws a CailError. It serves ONLY
      * `POST {baseUrl}/v1/chat/completions`; any other URL throws, catching SDK
      * base-URL misconfiguration loudly. The 401 `onAuthRequired` hook still
      * fires (on a cloned body) before the response is returned.
      */
-    chatFetch(credential: CailCredential, options?: CailCallOptions): (input: string | URL, init?: RequestInit) => Promise<Response>;
+    chatFetch(credential: CailCredential, options?: CailChatFetchOptions): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
     /**
      * Call a non-model gateway endpoint such as `/v1/models`, `/quota`, or key
      * delegation. Model invocation belongs in {@link run} /

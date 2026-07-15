@@ -11,6 +11,8 @@
 export interface CapturedRequest {
   url: string;
   method: string;
+  credentials?: RequestCredentials;
+  signal?: AbortSignal | null;
   /** Lower-cased header name → value, as they reached the wire. */
   headers: Record<string, string>;
   /** The request body, read to text (empty string if none). */
@@ -76,9 +78,16 @@ export function recordingFetch(
     let body = "";
     const b = init?.body;
     if (typeof b === "string") body = b;
-    else if (b != null) body = String(b);
+    else if (b != null) body = await new Response(b).text();
 
-    captured.push({ url, method, headers, body });
+    captured.push({
+      url,
+      method,
+      credentials: init?.credentials,
+      signal: init?.signal,
+      headers,
+      body,
+    });
 
     if (call >= queue.length) {
       throw new Error(

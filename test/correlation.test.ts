@@ -16,8 +16,10 @@ import {
   correlationFromHeaders,
   outboundCorrelationHeaders,
   TRACEPARENT_HEADER,
+  TRACESTATE_HEADER,
   CAIL_REQUEST_ID_HEADER,
   type CailCorrelation,
+  type CailCorrelationOptions,
   type CailCredential,
 } from "../src/index.js";
 import * as cailLog from "@cuny-ai-lab/cail-log";
@@ -30,9 +32,10 @@ const JWT: CailCredential = { kind: "jwt", token: "jwt-token-abc" };
 const CORR: CailCorrelation = {
   trace_id: "0af7651916cd43dd8448eb211c80319c",
   span_id: "b7ad6b7169203331",
-  request_id: "req-vector-0001",
+  trace_flags: 1,
+  request_id: "9f50d4a4-ef70-41b2-b225-0a5cbf2df5e7",
 };
-const WIRE_TRACEPARENT = `00-${CORR.trace_id}-${CORR.span_id}-01`;
+const WIRE_TRACEPARENT = `00-${CORR.trace_id}-${CORR.span_id}-0${CORR.trace_flags}`;
 
 function wired(
   responses: Parameters<typeof recordingFetch>[0],
@@ -58,8 +61,10 @@ describe("C-A — correlation contract re-exported verbatim from cail-log", () =
 
   it("C2 re-exported header constants are the canonical carrier names", () => {
     expect(TRACEPARENT_HEADER).toBe(cailLog.TRACEPARENT_HEADER);
+    expect(TRACESTATE_HEADER).toBe(cailLog.TRACESTATE_HEADER);
     expect(CAIL_REQUEST_ID_HEADER).toBe(cailLog.CAIL_REQUEST_ID_HEADER);
     expect(TRACEPARENT_HEADER).toBe("traceparent");
+    expect(TRACESTATE_HEADER).toBe("tracestate");
     expect(CAIL_REQUEST_ID_HEADER).toBe("x-cail-request-id");
   });
 
@@ -69,6 +74,32 @@ describe("C-A — correlation contract re-exported verbatim from cail-log", () =
     expect(adopted.trace_id).toBe(CORR.trace_id); // trace adopted
     expect(adopted.request_id).toBe(CORR.request_id); // request id adopted verbatim
     expect(adopted.span_id).not.toBe(CORR.span_id); // fresh span per hop (L7)
+    expect(adopted.trace_flags).toBe(1); // inbound sampling decision preserved
+  });
+
+  it("C3b unsampled correlation stays unsampled and the options type is re-exported", () => {
+    const unsampled = { ...CORR, trace_flags: 0 as const };
+    const outbound = outboundCorrelationHeaders(unsampled);
+    expect(outbound[TRACEPARENT_HEADER]).toBe(
+      `00-${CORR.trace_id}-${CORR.span_id}-00`,
+    );
+    expect(correlationFromHeaders(new Headers(outbound)).trace_flags).toBe(0);
+
+    const options: CailCorrelationOptions = { sampled: false };
+    expect(correlationFromHeaders(new Headers(), options).trace_flags).toBe(0);
+  });
+
+  it("C3c legacy non-UUID request ids are not adopted", () => {
+    const adopted = correlationFromHeaders(
+      new Headers({
+        [TRACEPARENT_HEADER]: WIRE_TRACEPARENT,
+        [CAIL_REQUEST_ID_HEADER]: "req-legacy-0001",
+      }),
+    );
+    expect(adopted.request_id).not.toBe("req-legacy-0001");
+    expect(adopted.request_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
   });
 });
 
@@ -106,7 +137,7 @@ describe("C-B — options.correlation forwards the trace downstream", () => {
     expect(rec.one.headers["x-cail-request-id"]).toBe(CORR.request_id);
   });
 
-  it("C7 chatFetch() forwards correlation (raw SDK adapter path)", async () => {
+  it("C7 chatFetch() forwards correlation on the SDK adapter path", async () => {
     const { rec, client } = wired(jsonOk({ ok: true }));
     const doFetch = client.chatFetch(JWT, { correlation: CORR });
     await doFetch(`${BASE}/v1/chat/completions`, {
@@ -132,6 +163,7 @@ describe("C-B — options.correlation forwards the trace downstream", () => {
         method: "GET",
         headers: {
           Traceparent: "00-ffffffffffffffffffffffffffffffff-ffffffffffffffff-00",
+          Tracestate: "stray=vendor",
           "X-CAIL-Request-Id": "stray-id",
         },
       },
@@ -139,6 +171,28 @@ describe("C-B — options.correlation forwards the trace downstream", () => {
       { correlation: CORR },
     );
     expect(rec.one.headers["traceparent"]).toBe(WIRE_TRACEPARENT);
+    expect(rec.one.headers["tracestate"]).toBeUndefined();
+    expect(rec.one.headers["x-cail-request-id"]).toBe(CORR.request_id);
+  });
+
+  it("C9b correlation replaces traceparent, tracestate, and request id as one unit", async () => {
+    const { rec, client } = wired(jsonOk({ ok: true }));
+    const correlation = { ...CORR, tracestate: "cail=trusted" };
+    await client.call(
+      "/v1/models",
+      {
+        method: "GET",
+        headers: {
+          Traceparent: "00-ffffffffffffffffffffffffffffffff-ffffffffffffffff-00",
+          Tracestate: "stray=vendor",
+          "X-CAIL-Request-Id": "stray-id",
+        },
+      },
+      JWT,
+      { correlation },
+    );
+    expect(rec.one.headers["traceparent"]).toBe(WIRE_TRACEPARENT);
+    expect(rec.one.headers["tracestate"]).toBe("cail=trusted");
     expect(rec.one.headers["x-cail-request-id"]).toBe(CORR.request_id);
   });
 
@@ -157,6 +211,17 @@ describe("C-B — options.correlation forwards the trace downstream", () => {
     expect((err as CailError).code).toBe("invalid_correlation");
     expect((err as CailError).status).toBe(0);
     expect(rec.captured.length).toBe(0);
+  });
+
+  it("C10b invalid trace flags fail before transport", async () => {
+    const { rec, client } = wired(jsonOk({ ok: true }));
+    const bad = { ...CORR, trace_flags: 2 } as unknown as CailCorrelation;
+    await expect(
+      client.call("/v1/models", { method: "GET" }, JWT, {
+        correlation: bad,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_correlation", status: 0 });
+    expect(rec.captured).toHaveLength(0);
   });
 
   it("C11 retries of one logical request carry the SAME correlation headers", async () => {
