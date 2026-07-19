@@ -309,6 +309,38 @@ or server connection closes.
 Important option types are exported as `CailClientOptions`, `CailCallOptions`,
 `CailRunOptions`, and `CailChatFetchOptions`.
 
+## Test fixtures (`@cuny-ai-lab/cail-client/testing`)
+
+Consumer tests kept hand-rolling the CAIL wire shapes and drifting from the
+contract the client actually consumes. Build fixtures from the blessed
+subpath instead:
+
+```ts
+import {
+  cailErrorEnvelope,      // { error: { message, type, param, code, cail? } }
+  cailErrorResponse,      // wraps an envelope in a JSON Response
+  quotaExceededEnvelope,  // canonical 429 quota_exceeded body
+  quotaExceededResponse,  // + Retry-After and x-should-retry: false headers
+  quotaSnapshotBody,      // valid GET /quota body
+  quotaSnapshotResponse,  // 200 JSON Response for a mocked GET /quota
+  quotaHeaders,           // the six all-or-none X-CAIL-Quota-* headers
+} from "@cuny-ai-lab/cail-client/testing";
+
+// Exactly what parseCailError / extractCailError consume:
+const wrapped = { lastError: { statusCode: 429, responseBody: JSON.stringify(quotaExceededEnvelope()) } };
+extractCailError(wrapped)?.extras.retry_after_seconds; // 3600
+
+// Exactly what getQuota consumes:
+const fetchImpl = async () => quotaSnapshotResponse({ remaining: 0, state: "stale" });
+```
+
+Every builder is round-tripped in this package's own suite through
+`parseCailError`, `extractCailError`, `getQuota`, and `parseQuotaHeaders`, so
+the fixtures cannot drift from the client. The subpath is additive test
+support: the runtime entry never imports it, and it imports no test
+framework. For canonical test *subjects* and identity-JWT minting, use
+`@cuny-ai-lab/cail-identity/testing`.
+
 ## Development
 
 ```bash
