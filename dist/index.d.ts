@@ -249,6 +249,35 @@ export declare function browserAuthRedirect(err: CailError): void;
  */
 export declare function parseCailError(response: Response): Promise<CailError>;
 /**
+ * Extract a `CailError` from an ALREADY-CONSUMED, possibly SDK-wrapped error
+ * *object* — the counterpart to {@link parseCailError}, which needs the live
+ * `Response`.
+ *
+ * AI SDKs bury the CAIL envelope: an `AI_RetryError` wraps `AI_APICallError`s
+ * whose `responseBody` is the envelope as a JSON *string*, provider adapters
+ * nest it under `cause`/`error`/`data`, and retry wrappers keep `lastError` +
+ * `errors[]` arrays. This walks those layers breadth-first (JSON-parsing any
+ * string layer before inspecting it) and returns the first of:
+ *
+ *   - a live `CailError` instance (returned by reference), or
+ *   - the wire envelope `{error:{message,type,param,code,cail?}}`
+ *     (per docs/ERROR_CONTRACT.md), rebuilt as a `CailError` with
+ *     `error.cail` spread into `extras` (so `extras.retry_after_seconds`
+ *     survives), or
+ *   - a bare CailError-shaped record (`{code,message,...}` with a CAIL
+ *     marker: `name:"CailError"`, a `cail`/`extras` object, or
+ *     `status` + `type`) — a copy that crossed a bundle/clone boundary.
+ *
+ * The `status` of a rebuilt error comes from the nearest wrapper's
+ * `statusCode`/`status` when the envelope itself carries none; `0` otherwise.
+ * Returns `null` when no CAIL envelope is found — callers keep their own
+ * handling for non-CAIL errors. This never sniffs bare HTTP statuses or
+ * message text: a plain 429 without a typed envelope is NOT a CAIL error.
+ *
+ * Dependency-free, synchronous, cycle-safe.
+ */
+export declare function extractCailError(value: unknown): CailError | null;
+/**
  * Build a CAIL model-proxy client. Validates the `app` slug at construction
  * (I2) — an invalid slug throws immediately (fail fast) rather than at call time.
  */

@@ -698,6 +698,190 @@ export async function parseCailError(response: Response): Promise<CailError> {
   );
 }
 
+/** Try to parse a string as JSON; non-strings and unparseable strings pass through. */
+function parseJsonLayer(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+/** A plausible HTTP status carried on an SDK wrapper (`statusCode` / `status`). */
+function wrapperStatus(record: Record<string, unknown>): number | undefined {
+  for (const key of ["statusCode", "status"] as const) {
+    const value = record[key];
+    if (
+      typeof value === "number" &&
+      Number.isInteger(value) &&
+      value >= 100 &&
+      value <= 599
+    ) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Build a `CailError` from the wire envelope's inner `error` member
+ * (`{message,type,param,code,cail?}`), or return `null` when the shape does
+ * not match the contract. Mirrors the shape validation in
+ * {@link parseCailError}.
+ */
+function cailErrorFromEnvelope(
+  error: Record<string, unknown>,
+  status: number,
+): CailError | null {
+  const cail = error["cail"];
+  const param = error["param"];
+  const validCail = cail === undefined || isRecord(cail);
+  const validParam =
+    param === undefined || param === null || typeof param === "string";
+  if (
+    typeof error["message"] !== "string" ||
+    typeof error["type"] !== "string" ||
+    typeof error["code"] !== "string" ||
+    !validParam ||
+    !validCail
+  ) {
+    return null;
+  }
+  return new CailError(
+    error["code"],
+    error["message"],
+    status,
+    cail === undefined ? {} : { ...cail },
+    error["type"],
+    typeof param === "string" ? param : null,
+  );
+}
+
+/**
+ * Recognize a bare CailError-shaped record — a `CailError` that lost its
+ * prototype by crossing a bundle boundary, a structured clone, or the wire
+ * envelope's inner `error` object reached directly. Requires string
+ * `code` + `message` plus at least one corroborating CAIL marker so ordinary
+ * platform errors (e.g. Node's `code: "ECONNRESET"`) never match.
+ */
+function cailErrorFromBareShape(
+  record: Record<string, unknown>,
+  fallbackStatus: number,
+): CailError | null {
+  if (
+    typeof record["code"] !== "string" ||
+    typeof record["message"] !== "string"
+  ) {
+    return null;
+  }
+  const hasMarker =
+    record["name"] === "CailError" ||
+    isRecord(record["cail"]) ||
+    isRecord(record["extras"]) ||
+    (typeof record["status"] === "number" &&
+      typeof record["type"] === "string");
+  if (!hasMarker) return null;
+
+  const status =
+    typeof record["status"] === "number" &&
+    Number.isInteger(record["status"]) &&
+    record["status"] >= 0
+      ? record["status"]
+      : fallbackStatus;
+  const extras: Record<string, unknown> = {
+    ...(isRecord(record["cail"]) ? record["cail"] : {}),
+    ...(isRecord(record["extras"]) ? record["extras"] : {}),
+  };
+  const param = record["param"];
+  return new CailError(
+    record["code"],
+    record["message"],
+    status,
+    extras,
+    typeof record["type"] === "string" ? record["type"] : "unknown_error",
+    typeof param === "string" ? param : null,
+  );
+}
+
+/** Safety cap on layers visited by {@link extractCailError} (adversarial inputs). */
+const EXTRACT_MAX_LAYERS = 256;
+
+/**
+ * Extract a `CailError` from an ALREADY-CONSUMED, possibly SDK-wrapped error
+ * *object* — the counterpart to {@link parseCailError}, which needs the live
+ * `Response`.
+ *
+ * AI SDKs bury the CAIL envelope: an `AI_RetryError` wraps `AI_APICallError`s
+ * whose `responseBody` is the envelope as a JSON *string*, provider adapters
+ * nest it under `cause`/`error`/`data`, and retry wrappers keep `lastError` +
+ * `errors[]` arrays. This walks those layers breadth-first (JSON-parsing any
+ * string layer before inspecting it) and returns the first of:
+ *
+ *   - a live `CailError` instance (returned by reference), or
+ *   - the wire envelope `{error:{message,type,param,code,cail?}}`
+ *     (per docs/ERROR_CONTRACT.md), rebuilt as a `CailError` with
+ *     `error.cail` spread into `extras` (so `extras.retry_after_seconds`
+ *     survives), or
+ *   - a bare CailError-shaped record (`{code,message,...}` with a CAIL
+ *     marker: `name:"CailError"`, a `cail`/`extras` object, or
+ *     `status` + `type`) — a copy that crossed a bundle/clone boundary.
+ *
+ * The `status` of a rebuilt error comes from the nearest wrapper's
+ * `statusCode`/`status` when the envelope itself carries none; `0` otherwise.
+ * Returns `null` when no CAIL envelope is found — callers keep their own
+ * handling for non-CAIL errors. This never sniffs bare HTTP statuses or
+ * message text: a plain 429 without a typed envelope is NOT a CAIL error.
+ *
+ * Dependency-free, synchronous, cycle-safe.
+ */
+export function extractCailError(value: unknown): CailError | null {
+  const layers: Array<{ value: unknown; status: number }> = [
+    { value, status: 0 },
+  ];
+  const seen = new Set<object>();
+  let visited = 0;
+
+  while (layers.length > 0 && visited < EXTRACT_MAX_LAYERS) {
+    const entry = layers.shift()!;
+    const layer = parseJsonLayer(entry.value);
+    if (!layer || typeof layer !== "object" || seen.has(layer)) {
+      continue;
+    }
+    seen.add(layer);
+    visited++;
+
+    if (layer instanceof CailError) return layer;
+
+    const record = layer as Record<string, unknown>;
+    const status = wrapperStatus(record) ?? entry.status;
+
+    if (isRecord(record["error"])) {
+      const fromEnvelope = cailErrorFromEnvelope(record["error"], status);
+      if (fromEnvelope !== null) return fromEnvelope;
+    }
+    const fromBareShape = cailErrorFromBareShape(record, status);
+    if (fromBareShape !== null) return fromBareShape;
+
+    for (const nested of [
+      record["responseBody"],
+      record["cause"],
+      record["error"],
+      record["data"],
+      record["lastError"],
+    ]) {
+      if (nested !== undefined) layers.push({ value: nested, status });
+    }
+    if (Array.isArray(record["errors"])) {
+      for (const nested of record["errors"]) {
+        layers.push({ value: nested, status });
+      }
+    }
+  }
+
+  return null;
+}
+
 function quotaBodyUnknownError(status: number): CailError {
   return new CailError(
     "unknown_error",

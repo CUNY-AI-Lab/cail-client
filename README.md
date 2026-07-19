@@ -299,6 +299,11 @@ or server connection closes.
 - `CailClient.getQuota(credential): Promise<CailQuotaSnapshot>`
 - `parseQuotaHeaders(headers): CailQuota | null`
 - `parseCailError(response): Promise<CailError>`
+- `extractCailError(value): CailError | null` — dig the typed CAIL envelope
+  out of an already-consumed, SDK-wrapped error object (AI SDK `RetryError` →
+  `APICallError.responseBody` JSON strings, nested
+  `cause`/`error`/`data`/`lastError`, `errors[]` arrays). Returns `null` for
+  non-CAIL errors; it never sniffs bare HTTP statuses or message text.
 - `browserAuthRedirect(error): void`
 
 Important option types are exported as `CailClientOptions`, `CailCallOptions`,

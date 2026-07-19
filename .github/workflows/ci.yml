@@ -8,6 +8,10 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    env:
+      # bun install resolves @cuny-ai-lab/* from GitHub Packages via the
+      # committed .npmrc, which reads this token.
+      NODE_AUTH_TOKEN: ${{ secrets.CAIL_PACKAGES_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
