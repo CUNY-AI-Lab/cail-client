@@ -1,1826 +1,338 @@
-/**
- * The contract vectors. Each asserts an invariant on the CAPTURED
- * WIRE via the recording mock proxy (test/mock.ts) — never on client internals.
- */
-import { describe, it, expect, vi } from "vitest";
-import {
-  createCailClient,
-  CailError,
-  parseCailError,
-  browserAuthRedirect,
-  type CailCredential,
-} from "../src/index.js";
-import {
-  recordingFetch,
-  jsonOk,
-  envelope,
-  nonJson,
-  sseStream,
-} from "./mock.js";
+import { describe, expect, it, vi } from "vitest";
 
-const BASE = "https://api.ailab.example";
-const APP = "alt-text";
-const JWT: CailCredential = { kind: "jwt", token: "jwt-token-abc" };
-const KEY: CailCredential = { kind: "key", token: "sk-cail-xyz" };
+import { createCailClient } from "../src/index.js";
 
-/** Build a client wired to a fresh recording fetch. */
-function wired(
-  responses: Parameters<typeof recordingFetch>[0],
-  opts: Partial<Parameters<typeof createCailClient>[0]> = {},
-) {
-  const rec = recordingFetch(responses);
-  const client = createCailClient({
-    baseUrl: BASE,
-    app: APP,
-    fetchImpl: rec.fn,
-    ...opts,
-  });
-  return { rec, client };
-}
+const baseUrl = "https://models.example.edu/openai/v1";
+const token = "sk-native-user-key";
+const identityJwt = "eyJhbGciOiJSUzI1NiJ9.payload.signature";
 
-function readableBody(text = "hello-stream"): ReadableStream<Uint8Array> {
-  const encoder = new TextEncoder();
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(encoder.encode(text));
-      controller.close();
-    },
+function clientWith(fetchImpl: typeof fetch) {
+  return createCailClient({
+    baseUrl,
+    app: "agent-studio",
+    fetchImpl,
   });
 }
 
-// ── Credential forwarding (I1) ────────────────────────────────────────────
-
-describe("I1 — exactly one credential on the wire", () => {
-  it("V1 jwt path sets X-CAIL-Identity-JWT and no Authorization", async () => {
-    const { rec, client } = wired(jsonOk({ ok: true }));
-    await client.call("/v1/models", { method: "GET" }, JWT);
-    expect(rec.one.headers["x-cail-identity-jwt"]).toBe("jwt-token-abc");
-    expect(rec.one.headers["authorization"]).toBeUndefined();
-  });
-
-  it("V2 jwt path STRIPS a caller-injected dummy Authorization (the footgun)", async () => {
-    const { rec, client } = wired(jsonOk({ ok: true }));
-    await client.call(
-      "/v1/models",
-      { method: "GET", headers: { Authorization: "Bearer dummy" } },
-      JWT,
-    );
-    expect(rec.one.headers["authorization"]).toBeUndefined();
-    expect(rec.one.headers["x-cail-identity-jwt"]).toBe("jwt-token-abc");
-  });
-
-  it("V3 key path sets Authorization: Bearer <key> and no JWT header", async () => {
-    const { rec, client } = wired(jsonOk({ ok: true }));
-    await client.call("/v1/models", { method: "GET" }, KEY);
-    expect(rec.one.headers["authorization"]).toBe("Bearer sk-cail-xyz");
-    expect(rec.one.headers["x-cail-identity-jwt"]).toBeUndefined();
-  });
-
-  it("V4 never both credential headers present, either kind", async () => {
-    // jwt kind, even with a stray JWT header already in init.
-    {
-      const { rec, client } = wired(jsonOk({ ok: true }));
-      await client.call(
-        "/v1/models",
-        {
-          headers: {
-            "X-CAIL-Identity-JWT": "stale",
-            Authorization: "Bearer d",
-          },
-        },
-        JWT,
-      );
-      const both =
-        "authorization" in rec.one.headers &&
-        "x-cail-identity-jwt" in rec.one.headers;
-      expect(both).toBe(false);
-    }
-    // key kind, with a stray JWT header already in init.
-    {
-      const { rec, client } = wired(jsonOk({ ok: true }));
-      await client.call(
-        "/v1/models",
-        { headers: { "X-CAIL-Identity-JWT": "stale" } },
-        KEY,
-      );
-      const both =
-        "authorization" in rec.one.headers &&
-        "x-cail-identity-jwt" in rec.one.headers;
-      expect(both).toBe(false);
-      expect(rec.one.headers["x-cail-identity-jwt"]).toBeUndefined();
-    }
-  });
-
-  it("V29 token with control characters throws before fetch and does not echo token", async () => {
-    const rec = recordingFetch(jsonOk({}));
-    const client = createCailClient({
-      baseUrl: BASE,
-      app: APP,
-      fetchImpl: rec.fn,
-    });
-    const err = await client
-      .call("/v1/models", {}, { kind: "key", token: "sk\r\nX-Evil: 1" })
-      .catch((e) => e);
-    expect(err).toBeInstanceOf(CailError);
-    expect(err.code).toBe("invalid_credential");
-    expect(err.message).not.toContain("sk\r\nX-Evil");
-    expect(rec.captured).toHaveLength(0);
-  });
-
-  it("rejects non-CAIL key families before fetch without echoing the token", async () => {
-    for (const token of ["sk-proj-provider-secret", "sk-cail-"]) {
-      const { rec, client } = wired(jsonOk({}));
-      const err = await client
-        .call("/v1/models", {}, { kind: "key", token })
-        .catch((e) => e);
-      expect(err).toBeInstanceOf(CailError);
-      expect(err.code).toBe("invalid_credential");
-      expect(err.message).not.toContain(token);
-      expect(rec.captured).toHaveLength(0);
-    }
-  });
-
-  it("omits ambient credentials by default", async () => {
-    const { rec, client } = wired(jsonOk({}));
-    await client.call("/v1/models", {}, JWT);
-    expect(rec.one.credentials).toBe("omit");
-  });
-
-  it("rejects Cookie and non-omit credentials before fetch unless explicitly enabled", async () => {
-    for (const init of [
-      { headers: { Cookie: "session=private" } },
-      { credentials: "include" as RequestCredentials },
-      { credentials: "same-origin" as RequestCredentials },
-    ]) {
-      const { rec, client } = wired(jsonOk({}));
-      const err = await client.call("/v1/models", init, JWT).catch((e) => e);
-      expect(err).toBeInstanceOf(CailError);
-      expect(err.code).toBe("invalid_request");
-      expect(err.message).not.toContain("session=private");
-      expect(rec.captured).toHaveLength(0);
-    }
-  });
-
-  it("preserves explicitly authorized ambient credentials", async () => {
-    const { rec, client } = wired(jsonOk({}), {
-      allowAmbientCredentials: true,
-    });
-    await client.call(
-      "/v1/models",
-      {
-        headers: { Cookie: "session=authorized" },
-        credentials: "include",
-      },
-      JWT,
-    );
-    expect(rec.one.credentials).toBe("include");
-    expect(rec.one.headers["cookie"]).toBe("session=authorized");
-  });
-});
-
-// ── Headers: app slug + metadata (I2/I3) ──────────────────────────────────
-
-describe("I2 — X-CAIL-App", () => {
-  it("V5 X-CAIL-App present == constructed slug on every call", async () => {
-    const { rec, client } = wired([jsonOk({ a: 1 }), jsonOk({ b: 2 })]);
-    await client.call("/v1/models", {}, JWT);
-    await client.call("/v1/models", {}, KEY);
-    expect(rec.captured).toHaveLength(2);
-    for (const c of rec.captured) expect(c.headers["x-cail-app"]).toBe(APP);
-  });
-
-  it("V5b caller cannot override X-CAIL-App", async () => {
-    const { rec, client } = wired(jsonOk({}));
-    await client.call("/v1/models", { headers: { "X-CAIL-App": "evil" } }, JWT);
-    expect(rec.one.headers["x-cail-app"]).toBe(APP);
-  });
-
-  it("array-form duplicate headers are combined like native Headers", async () => {
-    const headerPairs: [string, string][] = [
-      ["X-Trace", "first"],
-      ["X-Trace", "second"],
-    ];
-    const { rec, client } = wired(jsonOk({}));
-
-    await client.call("/v1/models", { headers: headerPairs }, JWT);
-
-    expect(rec.one.headers["x-trace"]).toBe("first, second");
-    expect(rec.one.headers["x-trace"]).toBe(
-      new Headers(headerPairs).get("x-trace"),
-    );
-  });
-
-  it("V6 invalid app slug throws at construct (Bad App / empty / 65 chars)", () => {
-    for (const bad of [
-      "Bad App",
-      "",
-      "a".repeat(65),
-      "-lead",
-      "UPPER",
-      "a b",
-    ]) {
-      expect(() =>
-        createCailClient({
-          baseUrl: BASE,
-          app: bad,
-          fetchImpl: recordingFetch(jsonOk({})).fn,
-        }),
-      ).toThrowError(CailError);
-    }
-    // A valid 64-char slug is accepted.
+describe("configuration", () => {
+  it("requires an HTTPS OpenAI /v1 base", () => {
+    expect(() =>
+      createCailClient({ baseUrl: "https://models.example.edu", app: "app" }),
+    ).toThrow("end with");
     expect(() =>
       createCailClient({
-        baseUrl: BASE,
-        app: "a".repeat(64),
-        fetchImpl: recordingFetch(jsonOk({})).fn,
+        baseUrl: "http://models.example.edu/v1",
+        app: "app",
       }),
-    ).not.toThrow();
+    ).toThrow("HTTPS");
   });
-});
 
-describe("I3 — X-CAIL-Metadata validation", () => {
-  it("V7 metadata {project:'x'} → X-CAIL-Metadata JSON present", async () => {
-    const { rec, client } = wired(jsonOk({}));
-    await client.call("/v1/models", {}, JWT, { metadata: { project: "x" } });
-    expect(rec.one.headers["x-cail-metadata"]).toBe(
-      JSON.stringify({ project: "x" }),
-    );
-  });
-
-  it("V8 9 keys → throws", async () => {
-    const { client } = wired(jsonOk({}));
-    const meta: Record<string, string> = {};
-    for (let i = 0; i < 9; i++) meta[`k${i}`] = "v";
-    await expect(
-      client.call("/v1/models", {}, JWT, { metadata: meta }),
-    ).rejects.toBeInstanceOf(CailError);
-  });
-
-  it("V9 value object/array → throws", async () => {
-    const { client } = wired(jsonOk({}));
-    await expect(
-      client.call("/v1/models", {}, JWT, {
-        metadata: { k: { nested: 1 } as unknown as string },
-      }),
-    ).rejects.toBeInstanceOf(CailError);
-    await expect(
-      client.call("/v1/models", {}, JWT, {
-        metadata: { k: [1, 2] as unknown as string },
-      }),
-    ).rejects.toBeInstanceOf(CailError);
-  });
-
-  it("V10 value >128 chars → throws", async () => {
-    const { client } = wired(jsonOk({}));
-    await expect(
-      client.call("/v1/models", {}, JWT, { metadata: { k: "a".repeat(129) } }),
-    ).rejects.toBeInstanceOf(CailError);
-    // exactly 128 is accepted
-    const { rec, client: c2 } = wired(jsonOk({}));
-    await c2.call("/v1/models", {}, JWT, { metadata: { k: "a".repeat(128) } });
-    expect(rec.one.headers["x-cail-metadata"]).toBeDefined();
-  });
-
-  it("V11 reserved key (user_id) → throws", async () => {
-    const { client } = wired(jsonOk({}));
-    for (const reserved of ["user_id", "app", "via"]) {
-      await expect(
-        client.call("/v1/models", {}, JWT, { metadata: { [reserved]: "x" } }),
-      ).rejects.toBeInstanceOf(CailError);
-    }
-  });
-
-  it("V30 existing metadata __proto__ object value → throws, not silently dropped", async () => {
-    const { rec, client } = wired(jsonOk({}));
-    const err = await client
-      .call(
-        "/v1/models",
-        {
-          headers: {
-            "X-CAIL-Metadata": '{"__proto__":{"nested":1},"project":"x"}',
-          },
-        },
-        JWT,
-      )
-      .catch((e) => e);
-    expect(err).toBeInstanceOf(CailError);
-    expect(err.code).toBe("invalid_metadata");
-    expect(rec.captured).toHaveLength(0);
-  });
-
-  it("V30b options.metadata constructor key → throws", async () => {
-    const { rec, client } = wired(jsonOk({}));
-    const metadata = { ["constructor"]: "x" };
-    const err = await client
-      .call("/v1/models", {}, JWT, { metadata })
-      .catch((e) => e);
-    expect(err).toBeInstanceOf(CailError);
-    expect(err.code).toBe("invalid_metadata");
-    expect(rec.captured).toHaveLength(0);
-  });
-});
-
-// ── Error envelope → typed error (I4) ─────────────────────────────────────
-
-describe("I4 — error envelope → typed error, message verbatim", () => {
-  it("V12 401 authentication_required carries message + login_url verbatim", async () => {
-    const body = {
-      error: "authentication_required",
-      message: "Your session has expired. Please sign in again.",
-      login_url: "/login",
-    };
-    const { client } = wired(envelope(401, body), {
-      onAuthRequired: () => {},
-    });
-    const err = await client.call("/v1/models", {}, JWT).catch((e) => e);
-    expect(err).toBeInstanceOf(CailError);
-    expect(err.code).toBe("authentication_required");
-    expect(err.type).toBe("authentication_error");
-    expect(err.param).toBeNull();
-    expect(err.status).toBe(401);
-    expect(err.message).toBe(body.message);
-    expect(err.extras["login_url"]).toBe("/login");
-  });
-
-  it("V13 429 quota_exceeded carries retry_after_seconds + Retry-After", async () => {
-    const body = {
-      error: "quota_exceeded",
-      message: "You have reached your monthly budget.",
-      retry_after_seconds: 3600,
-    };
-    const { client } = wired(envelope(429, body, { "Retry-After": "3600" }));
-    const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
-    expect(err).toBeInstanceOf(CailError);
-    expect(err.code).toBe("quota_exceeded");
-    expect(err.status).toBe(429);
-    expect(err.extras["retry_after_seconds"]).toBe(3600);
-    expect(err.extras["retry_after"]).toBe("3600");
-  });
-
-  it("V14 403 forbidden → typed", async () => {
-    const { client } = wired(
-      envelope(403, {
-        error: "forbidden",
-        message: "Missing entitlement.",
-        missing_entitlement: "pro",
-      }),
-    );
-    const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
-    expect(err.code).toBe("forbidden");
-    expect(err.status).toBe(403);
-    expect(err.extras["missing_entitlement"]).toBe("pro");
-  });
-
-  it("V15 409 key_limit_reached → typed", async () => {
-    const { client } = wired(
-      envelope(409, {
-        error: "key_limit_reached",
-        message: "Too many keys.",
-        limit: 10,
-      }),
-    );
-    const err = await client
-      .call("/keys", { method: "POST" }, JWT)
-      .catch((e) => e);
-    expect(err.code).toBe("key_limit_reached");
-    expect(err.status).toBe(409);
-    expect(err.extras["limit"]).toBe(10);
-  });
-
-  it("V16 502 upstream_auth_error → typed", async () => {
-    // 502 is 5xx: disable retries so the single envelope surfaces as the error.
-    const { client } = wired(
-      envelope(502, {
-        error: "upstream_auth_error",
-        message: "Contact ailab@gc.cuny.edu.",
-      }),
-      { maxRetries: 0 },
-    );
-    const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
-    expect(err.code).toBe("upstream_auth_error");
-    expect(err.status).toBe(502);
-  });
-
-  it("V17 503 sso_unavailable → typed", async () => {
-    const { client } = wired(
-      envelope(503, {
-        error: "sso_unavailable",
-        message: "SSO is temporarily down.",
-      }),
-      { maxRetries: 0 },
-    );
-    const err = await client.call("/v1/models", {}, JWT).catch((e) => e);
-    expect(err.code).toBe("sso_unavailable");
-    expect(err.status).toBe(503);
-  });
-
-  it("V18 non-JSON 500 body → unknown_error, NOT swallowed as success", async () => {
-    const { client } = wired(
-      nonJson(500, "<html>Internal Server Error</html>"),
-      {
-        maxRetries: 0,
-      },
-    );
-    const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
-    expect(err).toBeInstanceOf(CailError);
-    expect(err.code).toBe("unknown_error");
-    expect(err.status).toBe(500);
-    // Prove it was thrown, never returned as a Response.
-    expect(err).not.toBeInstanceOf(Response);
-  });
-
-  it("V33b non-JSON 503 preserves Retry-After on unknown_error", async () => {
-    const { client } = wired(nonJson(503, "busy", { "Retry-After": "7" }), {
-      maxRetries: 0,
-    });
-    const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
-    expect(err).toBeInstanceOf(CailError);
-    expect(err.code).toBe("unknown_error");
-    expect(err.status).toBe(503);
-    expect(err.extras["retry_after"]).toBe("7");
-  });
-
-  it("preserves request and retry response metadata on typed errors", async () => {
-    const { client } = wired(
-      envelope(
-        502,
-        { error: "upstream_service_error", message: "outcome uncertain" },
-        {
-          "x-request-id": "req-123",
-          "x-should-retry": "false",
-        },
-      ),
-      { maxRetries: 0 },
-    );
-    const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
-    expect(err.extras).toMatchObject({
-      request_id: "req-123",
-      should_retry: false,
-    });
-  });
-
-  it("preserves response metadata even when the error body is malformed", async () => {
-    const { client } = wired(
-      nonJson(503, "busy", {
-        "x-request-id": "req-456",
-        "x-should-retry": "true",
-      }),
-      { maxRetries: 0 },
-    );
-    const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
-    expect(err.code).toBe("unknown_error");
-    expect(err.extras).toMatchObject({
-      request_id: "req-456",
-      should_retry: true,
-    });
-  });
-
-  it("V19 message is byte-identical to the envelope's message (no rewording)", async () => {
-    const exact = "Précisely thîs — verbatim, incl. 中文 & symbols: <>&\"'.";
-    const { client } = wired(
-      envelope(400, { error: "bad_request", message: exact }),
-    );
-    const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
-    expect(err.message).toBe(exact);
-  });
-});
-
-// ── Retry policy (I5) ─────────────────────────────────────────────────────
-
-describe("I5 — retry policy", () => {
-  it("forces manual redirects even when the caller requests follow", async () => {
-    const rec = recordingFetch(jsonOk({ ok: true }));
-    const fetchImpl = vi.fn(
-      async (input: RequestInfo | URL, init?: RequestInit) => {
-        expect(init?.redirect).toBe("manual");
-        return rec.fn(input, init);
-      },
-    ) as typeof fetch;
-    const client = createCailClient({
-      baseUrl: BASE,
-      app: APP,
-      fetchImpl,
-    });
-
-    await client.call("/v1/models", { redirect: "follow" }, JWT);
-
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("rejects a proxy redirect as unexpected_redirect without retrying", async () => {
-    const redirect = new Response(null, {
-      status: 302,
-      headers: { Location: "https://evil.example/landing" },
-    });
-    const { rec, client } = wired(redirect);
-
-    const err = await client.call("/v1/models", {}, JWT).catch((e) => e);
-
-    expect(err).toBeInstanceOf(CailError);
-    expect(err.code).toBe("unexpected_redirect");
-    expect(err.status).toBe(302);
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("V20 500 then 200 → one retry, resolves", async () => {
-    const { rec, client } = wired([
-      envelope(500, { error: "server_error", message: "oops" }),
-      jsonOk({ ok: true }),
-    ]);
-    const resp = await client.call("/v1/models", { method: "GET" }, KEY);
-    expect(resp.status).toBe(200);
-    expect(rec.captured).toHaveLength(2);
-  });
-
-  it("x-should-retry:false suppresses the default 5xx retry", async () => {
-    const { rec, client } = wired([
-      envelope(
-        502,
-        { error: "upstream_service_error", message: "outcome uncertain" },
-        { "x-should-retry": "false" },
-      ),
-      jsonOk({ ok: true }),
-    ]);
-    const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
-    expect(err).toMatchObject({ code: "upstream_service_error", status: 502 });
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("V21 network-error then 200 → retries", async () => {
-    const { rec, client } = wired([
-      { networkError: true },
-      jsonOk({ ok: true }),
-    ]);
-    const resp = await client.call("/v1/models", { method: "GET" }, KEY);
-    expect(resp.status).toBe(200);
-    expect(rec.captured).toHaveLength(2);
-  });
-
-  it("network errors never copy transport messages containing credentials or bodies", async () => {
-    const secret = "sk-cail-do-not-echo";
-    const body = "private request body";
-    const fetchImpl = (async () => {
-      throw new TypeError(`failed with ${secret} and ${body}`);
-    }) as typeof fetch;
-    const client = createCailClient({
-      baseUrl: BASE,
-      app: APP,
-      fetchImpl,
-      maxRetries: 0,
-    });
-    const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
-    expect(err).toBeInstanceOf(CailError);
-    expect(err.code).toBe("network_error");
-    expect(err.message).not.toContain(secret);
-    expect(err.message).not.toContain(body);
-  });
-
-  it("V22 400 → NO retry (throws immediately)", async () => {
-    const { rec, client } = wired([
-      envelope(400, { error: "bad_request", message: "bad" }),
-      jsonOk({ ok: true }), // must never be reached
-    ]);
-    await expect(client.call("/v1/models", {}, KEY)).rejects.toBeInstanceOf(
-      CailError,
-    );
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("V23 429 → NO retry", async () => {
-    const { rec, client } = wired([
-      envelope(429, { error: "quota_exceeded", message: "budget" }),
-      jsonOk({ ok: true }),
-    ]);
-    await expect(client.call("/v1/models", {}, KEY)).rejects.toBeInstanceOf(
-      CailError,
-    );
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("V23b retries exhausted on persistent 5xx → throws typed", async () => {
-    // One envelope per expected wire call (the mock throws on over-calling).
-    const down = () =>
-      envelope(500, { error: "server_error", message: "still down" });
-    const { rec, client } = wired([down(), down(), down()], { maxRetries: 2 });
-    const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
-    expect(err).toBeInstanceOf(CailError);
-    expect(rec.captured).toHaveLength(3); // 1 + 2 retries
-  });
-
-  it("buffered model POST retries network loss with one stable idempotency key", async () => {
-    const { rec, client } = wired([
-      { networkError: true },
-      jsonOk({ ok: true }),
-    ]);
-
-    const response = await client.run(
-      { model: "@cf/m/x", input: { prompt: "hi" } },
-      KEY,
-    );
-
-    expect(response.status).toBe(200);
-    expect(rec.captured).toHaveLength(2);
-    const firstKey = rec.captured[0]!.headers["idempotency-key"];
-    expect(firstKey).toMatch(/^[0-9a-f-]{36}$/);
-    expect(rec.captured[1]!.headers["idempotency-key"]).toBe(firstKey);
-  });
-
-  it("buffered model POST retries an in-progress idempotency conflict", async () => {
-    const { rec, client } = wired([
-      envelope(
-        409,
-        { error: "idempotency_in_progress", message: "still running" },
-        { "retry-after": "0" },
-      ),
-      jsonOk({ ok: true }),
-    ]);
-
-    const response = await client.run(
-      { model: "@cf/m/x", input: { prompt: "hi" } },
-      KEY,
-    );
-
-    expect(response.status).toBe(200);
-    expect(rec.captured).toHaveLength(2);
-    expect(rec.captured[1]!.headers["idempotency-key"]).toBe(
-      rec.captured[0]!.headers["idempotency-key"],
-    );
-  });
-
-  it("does not retry an unrelated 409 on a buffered model POST", async () => {
-    const { rec, client } = wired([
-      envelope(409, { error: "conflict", message: "not retryable" }),
-      jsonOk({ ok: true }),
-    ]);
-
-    await expect(
-      client.run({ model: "@cf/m/x", input: { prompt: "hi" } }, KEY),
-    ).rejects.toMatchObject({ code: "conflict", status: 409 });
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("model POST 5xx is never retried without gateway idempotency", async () => {
-    const { rec, client } = wired([
-      envelope(503, { error: "server_error", message: "uncertain execution" }),
-      jsonOk({ ok: true }),
-    ]);
-
-    await expect(
-      client.chatCompletions({ model: "@cf/m/x", messages: [] }, KEY),
-    ).rejects.toMatchObject({ code: "server_error", status: 503 });
-
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("V23c present-but-invalid maxRetries throws invalid_config at construction (never silently coerced)", () => {
-    for (const bad of [
-      NaN,
-      Infinity,
-      -Infinity,
-      -1,
-      2.5,
-      "3" as unknown as number,
-    ]) {
-      let err: unknown = null;
-      try {
-        createCailClient({
-          baseUrl: BASE,
-          app: APP,
-          fetchImpl: recordingFetch(jsonOk({})).fn,
-          maxRetries: bad,
-        });
-      } catch (e) {
-        err = e;
-      }
-      expect(err, `maxRetries=${String(bad)} must throw`).toBeInstanceOf(
-        CailError,
-      );
-      expect((err as CailError).code).toBe("invalid_config");
-      expect((err as CailError).message).toContain("maxRetries");
-    }
-  });
-
-  it("V23d absent maxRetries defaults to 2 (1 + 2 attempts); valid values honored", async () => {
-    // Absent → default 2 retries: exactly three wire calls.
-    const down = () =>
-      envelope(500, { error: "server_error", message: "still down" });
-    {
-      const { rec, client } = wired([down(), down(), down()]);
-      const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
-      expect(err).toBeInstanceOf(CailError);
-      expect(rec.captured).toHaveLength(3);
-    }
-    // Valid 0 honored: exactly one wire call.
-    {
-      const { rec, client } = wired(down(), { maxRetries: 0 });
-      await client.call("/v1/models", {}, KEY).catch(() => {});
-      expect(rec.captured).toHaveLength(1);
-    }
-    // Valid 1 honored: exactly two wire calls.
-    {
-      const { rec, client } = wired([down(), down()], { maxRetries: 1 });
-      await client.call("/v1/models", {}, KEY).catch(() => {});
-      expect(rec.captured).toHaveLength(2);
-    }
-  });
-
-  it("V27 abort mid-flight rejects with original AbortError and does not retry", async () => {
-    const { rec, client } = wired({ abortableHang: true });
-    const ac = new AbortController();
-    const abortErr = new DOMException("stop", "AbortError");
-    const started = Date.now();
-    const pending = client
-      .call("/v1/models", { signal: ac.signal }, KEY)
-      .catch((e) => e);
-
-    setTimeout(() => ac.abort(abortErr), 10);
-    const err = await pending;
-
-    expect(Date.now() - started).toBeLessThan(100);
-    expect(err).toBe(abortErr);
-    expect(err.name).toBe("AbortError");
-    expect(err).not.toBeInstanceOf(CailError);
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it.each(["run", "chatCompletions"] as const)(
-    "%s accepts an option signal and preserves its abort reason",
-    async (method) => {
-      const fetchImpl = vi.fn(
-        async (_input: RequestInfo | URL, init?: RequestInit) => {
-          if (!init?.signal) return jsonOk({ signal: "missing" });
-          const signal = init.signal;
-          return await new Promise<Response>((_resolve, reject) => {
-            const rejectAbort = () => reject(signal.reason);
-            if (signal.aborted) rejectAbort();
-            else signal.addEventListener("abort", rejectAbort, { once: true });
-          });
-        },
-      ) as typeof fetch;
-      const client = createCailClient({
-        baseUrl: BASE,
-        app: APP,
-        fetchImpl,
-      });
-      const ac = new AbortController();
-      const abortErr = new DOMException(`${method} stop`, "AbortError");
-      const pending =
-        method === "run"
-          ? client.run({ model: "m", input: "x" }, KEY, { signal: ac.signal })
-          : client.chatCompletions(
-              { model: "m", messages: [], stream: true },
-              KEY,
-              { signal: ac.signal },
-            );
-      ac.abort(abortErr);
-      await expect(pending).rejects.toBe(abortErr);
-      expect(fetchImpl).toHaveBeenCalledTimes(1);
-    },
-  );
-
-  it("options.signal deterministically overrides init.signal", async () => {
-    const { rec, client } = wired(jsonOk({}));
-    const initController = new AbortController();
-    const optionController = new AbortController();
-    await client.call(
-      "/v1/models",
-      { signal: initController.signal },
-      KEY,
-      { signal: optionController.signal },
-    );
-    expect(rec.one.signal).toBe(optionController.signal);
-  });
-
-  it("V27b abort during 5xx backoff rejects promptly and does not issue retry", async () => {
-    // Retry-After: 1 pins the backoff sleep at >= 1s so the 10ms abort is
-    // guaranteed to land mid-backoff (the jittered backoff alone can be
-    // arbitrarily short).
-    const { rec, client } = wired([
-      envelope(
-        500,
-        { error: "server_error", message: "try later" },
-        { "Retry-After": "1" },
-      ),
-      jsonOk({ ok: true }),
-    ]);
-    const ac = new AbortController();
-    const abortErr = new DOMException("stop", "AbortError");
-    const started = Date.now();
-    const pending = client
-      .call("/v1/models", { signal: ac.signal }, KEY)
-      .catch((e) => e);
-
-    setTimeout(() => ac.abort(abortErr), 10);
-    const err = await pending;
-
-    expect(Date.now() - started).toBeLessThan(100);
-    expect(err).toBe(abortErr);
-    expect(err.name).toBe("AbortError");
-    expect(err).not.toBeInstanceOf(CailError);
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("V28 ReadableStream body + 500 envelope → no retry, preserves envelope", async () => {
-    const { rec, client } = wired([
-      envelope(500, { error: "server_error", message: "stream failed" }),
-      jsonOk({ ok: true }),
-    ]);
-    const err = await client
-      .call("/keys", { method: "POST", body: readableBody() }, KEY)
-      .catch((e) => e);
-    expect(err).toBeInstanceOf(CailError);
-    expect(err.code).toBe("server_error");
-    expect(err.message).toBe("stream failed");
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("V28b ReadableStream body + network error → no retry, network_error", async () => {
-    const { rec, client } = wired([
-      { networkError: true },
-      jsonOk({ ok: true }),
-    ]);
-    const err = await client
-      .call("/keys", { method: "POST", body: readableBody() }, KEY)
-      .catch((e) => e);
-    expect(err).toBeInstanceOf(CailError);
-    expect(err.code).toBe("network_error");
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("V33 503 Retry-After seconds is honored before retry", async () => {
-    const { rec, client } = wired([
-      envelope(
-        503,
-        { error: "server_busy", message: "try later" },
-        { "Retry-After": "1" },
-      ),
-      jsonOk({ ok: true }),
-    ]);
-    const started = Date.now();
-    const resp = await client.call("/v1/models", {}, KEY);
-    const elapsed = Date.now() - started;
-    expect(resp.status).toBe(200);
-    expect(rec.captured).toHaveLength(2);
-    expect(elapsed).toBeGreaterThanOrEqual(900);
-  });
-});
-
-// ── 401 hook + passthrough + verbatim body (I6/I7/I8) ─────────────────────
-
-describe("I6 — 401 hook", () => {
-  it("V24 401 authentication_required → onAuthRequired invoked once with the err, still throws", async () => {
-    const spy = vi.fn();
-    const body = {
-      error: "authentication_required",
-      message: "sign in",
-      login_url: "/login",
-    };
-    const { client } = wired(envelope(401, body), { onAuthRequired: spy });
-    const err = await client.call("/v1/models", {}, JWT).catch((e) => e);
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy).toHaveBeenCalledWith(err);
-    expect(err).toBeInstanceOf(CailError);
-  });
-
-  it("V24b 401 invalid_api_key does NOT invoke onAuthRequired (only authentication_required)", async () => {
-    const spy = vi.fn();
-    const { client } = wired(
-      envelope(401, { error: "invalid_api_key", message: "bad key" }),
-      { onAuthRequired: spy },
-    );
-    await client.call("/v1/models", {}, KEY).catch(() => {});
-    expect(spy).not.toHaveBeenCalled();
-  });
-
-  it("V24c browserAuthRedirect same-origin guard: rejects cross-origin login_url", () => {
-    const loc = {
-      href: "https://tools.ailab.gc.cuny.edu/alt-text",
-      origin: "https://tools.ailab.gc.cuny.edu",
-      pathname: "/alt-text",
-      search: "",
-    };
-    const orig = (globalThis as { location?: unknown }).location;
-    (globalThis as { location?: unknown }).location = loc;
-    try {
-      browserAuthRedirect(
-        new CailError("authentication_required", "x", 401, {
-          login_url: "https://evil.example/login",
-        }),
-      );
-      // Cross-origin login_url ignored → falls back to same-origin /login?rt=
-      expect(loc.href.startsWith("/login?rt=")).toBe(true);
-
-      loc.href = "https://tools.ailab.gc.cuny.edu/alt-text";
-      browserAuthRedirect(
-        new CailError("authentication_required", "x", 401, {
-          login_url: "/login?rt=%2Falt-text",
-        }),
-      );
-      expect(loc.href).toContain("/login?rt=");
-    } finally {
-      (globalThis as { location?: unknown }).location = orig;
-    }
-  });
-
-  it("V31 throwing onAuthRequired hook does not mask the CailError", async () => {
-    const { client } = wired(
-      envelope(401, {
-        error: "authentication_required",
-        message: "sign in",
-        login_url: "/login",
-      }),
-      {
-        onAuthRequired: () => {
-          throw new Error("hook exploded");
-        },
-      },
-    );
-    const err = await client.call("/v1/models", {}, JWT).catch((e) => e);
-    expect(err).toBeInstanceOf(CailError);
-    expect(err.code).toBe("authentication_required");
-    expect(err.message).toBe("sign in");
-  });
-
-  it("V32 malformed authentication_required envelope → unknown_error, no hook", async () => {
-    const spy = vi.fn();
-    const { client } = wired(
-      envelope(401, {
-        error: "authentication_required",
-        message: 123,
-        login_url: "/login",
-      }),
-      { onAuthRequired: spy },
-    );
-    const err = await client.call("/v1/models", {}, JWT).catch((e) => e);
-    expect(err).toBeInstanceOf(CailError);
-    expect(err.code).toBe("unknown_error");
-    expect(err.status).toBe(401);
-    expect(spy).not.toHaveBeenCalled();
-  });
-});
-
-describe("I7 — 2xx passthrough, streams intact", () => {
-  it("V25 200 SSE stream body returned by reference, first chunk readable before close (not buffered)", async () => {
-    const stream = sseStream(["data: one\n\n", "data: two\n\n"], 30);
-    const { client } = wired(stream);
-    const resp = await client.call("/v1/models", { method: "GET" }, KEY);
-    // Same Response object by reference (I7).
-    expect(resp).toBe(stream);
-    expect(resp.body).not.toBeNull();
-
-    const reader = resp.body!.getReader();
-    const first = await reader.read();
-    const decoder = new TextDecoder();
-    expect(decoder.decode(first.value)).toBe("data: one\n\n");
-    // The stream is still open at this point — proves no buffering.
-    const stillOpen = (
-      stream as unknown as { __closed: () => boolean }
-    ).__closed();
-    expect(stillOpen).toBe(false);
-    reader.cancel();
-  });
-});
-
-describe("I8 — canonical model run", () => {
-  it("V26 POSTs exactly {model,input} to /v1/run", async () => {
-    const request = {
-      model: "@cf/example/text-model",
-      input: { messages: [{ role: "user", content: "hi" }] },
-      ignored: "not part of the wire contract",
-    };
-    const { rec, client } = wired(jsonOk({ ok: true }));
-    await client.run(request, JWT, { metadata: { purpose: "test" } });
-
-    expect(rec.one.url).toBe(`${BASE}/v1/run`);
-    expect(rec.one.method).toBe("POST");
-    expect(rec.one.headers["content-type"]).toBe("application/json");
-    expect(rec.one.headers["x-cail-app"]).toBe(APP);
-    expect(rec.one.headers["x-cail-metadata"]).toBe(
-      JSON.stringify({ purpose: "test" }),
-    );
-    expect(JSON.parse(rec.one.body)).toEqual({
-      model: request.model,
-      input: request.input,
-    });
-  });
-
-  it("V26b preserves the successful Response by reference", async () => {
-    const response = jsonOk({ response: "hello" });
-    const { client } = wired(response);
-    await expect(
-      client.run({ model: "@cf/example/text-model", input: "hi" }, KEY),
-    ).resolves.toBe(response);
-  });
-
-  it("V26c rejects malformed requests before fetch", async () => {
-    const { rec, client } = wired(jsonOk({}));
-    await expect(
-      client.run({ model: "", input: "hi" }, KEY),
-    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
-    await expect(
-      client.run({ model: "@cf/example/text-model", input: undefined }, KEY),
-    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
-    expect(rec.captured).toHaveLength(0);
-  });
-
-  it("V26d generic call() cannot invoke the model endpoint", async () => {
-    const { rec, client } = wired(jsonOk({}));
-    await expect(
-      client.call("/v1/run", { method: "POST" }, KEY),
-    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
-    expect(rec.captured).toHaveLength(0);
-  });
-});
-
-// ── parseCailError as a standalone export ─────────────────────────────────
-
-describe("parseCailError (standalone)", () => {
-  it("parses an envelope", async () => {
-    const err = await parseCailError(
-      envelope(429, { error: "quota_exceeded", message: "no budget" }),
-    );
-    expect(err.code).toBe("quota_exceeded");
-    expect(err.message).toBe("no budget");
-  });
-  it("rejects the retired flat envelope", async () => {
-    const err = await parseCailError(
-      new Response(
-        JSON.stringify({ error: "quota_exceeded", message: "old shape" }),
-        {
-          status: 429,
-          headers: { "content-type": "application/json" },
-        },
-      ),
-    );
-    expect(err.code).toBe("unknown_error");
-  });
-  it("non-JSON → unknown_error", async () => {
-    const err = await parseCailError(nonJson(500, "boom"));
-    expect(err.code).toBe("unknown_error");
-  });
-
-  it("preserves AbortError thrown while reading an error body", async () => {
-    const response = new Response(null, { status: 400 });
-    Object.defineProperty(response, "text", {
-      value: async () => {
-        throw new DOMException("aborted", "AbortError");
-      },
-    });
-
-    const err = await parseCailError(response).catch((e) => e);
-
-    expect(err).not.toBeInstanceOf(CailError);
-    expect(err.name).toBe("AbortError");
-  });
-});
-
-// ── I8 extension — canonical chat completions ─────────────────────────────
-
-describe("I8 — canonical chat completions", () => {
-  it("V27 POSTs the OpenAI body verbatim to /v1/chat/completions (client never injects stream_options)", async () => {
-    const request = {
-      model: "@cf/example/text-model",
-      messages: [{ role: "user", content: "hi" }],
-      stream: true,
-      temperature: 0.2,
-    };
-    const { rec, client } = wired(jsonOk({ ok: true }));
-    await client.chatCompletions(request, JWT, { metadata: { purpose: "t" } });
-    expect(rec.one.url).toBe(`${BASE}/v1/chat/completions`);
-    expect(rec.one.method).toBe("POST");
-    expect(rec.one.headers["content-type"]).toBe("application/json");
-    expect(rec.one.headers["x-cail-app"]).toBe(APP);
-    expect(JSON.parse(rec.one.body)).toEqual(request); // verbatim — include_usage is the gateway's job
-  });
-
-  it("V28 streaming Response passes through by reference, first chunk readable before close", async () => {
-    const stream = sseStream(
-      ['data: {"choices":[]}\n\n', "data: [DONE]\n\n"],
-      30,
-    );
-    const { client } = wired(stream);
-    const resp = await client.chatCompletions(
-      { model: "@cf/m/x", messages: [], stream: true },
-      KEY,
-    );
-    expect(resp).toBe(stream);
-    const reader = resp.body!.getReader();
-    const first = await reader.read();
-    expect(new TextDecoder().decode(first.value)).toContain("choices");
-    expect((stream as unknown as { __closed: () => boolean }).__closed()).toBe(
-      false,
-    ); // not buffered
-    reader.cancel();
-  });
-
-  it("V29 rejects malformed requests before fetch; non-2xx throws the envelope", async () => {
-    const { rec, client } = wired(
-      envelope(429, {
-        error: "quota_exceeded",
-        message: "over budget",
-        retry_after_seconds: 9,
-      }),
-    );
-    await expect(
-      client.chatCompletions({ model: "", messages: [] }, KEY),
-    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
-    await expect(
-      client.chatCompletions(
-        { model: "@cf/m/x", messages: "no" as unknown as unknown[] },
-        KEY,
-      ),
-    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
-    await expect(
-      client.chatCompletions(
-        { model: "@cf/m/x", messages: [], stream: "yes" as unknown as boolean },
-        KEY,
-      ),
-    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
-    expect(rec.captured).toHaveLength(0);
-    await expect(
-      client.chatCompletions({ model: "@cf/m/x", messages: [] }, KEY),
-    ).rejects.toMatchObject({ code: "quota_exceeded", status: 429 });
-  });
-
-  it("V30 generic call() cannot invoke /v1/chat/completions", async () => {
-    const { rec, client } = wired(jsonOk({}));
-    await expect(
-      client.call("/v1/chat/completions", { method: "POST" }, KEY),
-    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
-    expect(rec.captured).toHaveLength(0);
-  });
-});
-
-// ── chatFetch — the OpenAI-compatible SDK adapter ─────────────────────────
-
-describe("chatFetch — SDK adapter", () => {
-  const CHAT_URL = `${BASE}/v1/chat/completions`;
-  const sdkInit = (body: unknown): RequestInit => ({
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: "Bearer cail-proxy", // the AI-SDK dummy-key footgun
-    },
-    body: JSON.stringify(body),
-  });
-
-  it("V31 applies I1/I2 discipline: dummy Authorization stripped, JWT + app slug on the wire", async () => {
-    const { rec, client } = wired(jsonOk({ ok: true }));
-    const fetchLike = client.chatFetch(JWT);
-    await fetchLike(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] }));
-    expect(rec.one.headers["authorization"]).toBeUndefined();
-    expect(rec.one.headers["x-cail-identity-jwt"]).toBe("jwt-token-abc");
-    expect(rec.one.headers["x-cail-app"]).toBe(APP);
-  });
-
-  it("V32 quota policy: 429 quota_exceeded throws CailError after one client wire call", async () => {
-    const { rec, client } = wired([
-      envelope(
-        429,
-        {
-          error: "quota_exceeded",
-          message: "over budget",
-          retry_after_seconds: 120,
-        },
-        { "retry-after": "120" },
-      ),
-      jsonOk({ never: "reached" }),
-    ]);
-    const fetchLike = client.chatFetch(KEY);
-    await expect(
-      fetchLike(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] })),
-    ).rejects.toMatchObject({
-      code: "quota_exceeded",
-      status: 429,
-      message: "over budget",
-      extras: expect.objectContaining({ retry_after_seconds: 120 }),
-    });
-    expect(rec.captured).toHaveLength(1); // thrown on the FIRST failure — no retry storm
-  });
-
-  it("V32a non-quota 429 remains available to the SDK parser", async () => {
-    const { rec, client } = wired(
-      envelope(429, { error: "rate_limited", message: "slow down" }),
-    );
-    const resp = await client.chatFetch(KEY)(
-      CHAT_URL,
-      sdkInit({ model: "@cf/m/x", messages: [] }),
-    );
-    expect(resp.status).toBe(429);
-    expect(((await resp.json()) as any).error.code).toBe("rate_limited"); // body intact
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("V32b 500 is returned unretried; default network failure is a non-retryable CailError", async () => {
-    const { rec, client } = wired([nonJson(500, "boom"), jsonOk({})]);
-    const fetchLike = client.chatFetch(KEY);
-    const resp = await fetchLike(
-      CHAT_URL,
-      sdkInit({ model: "@cf/m/x", messages: [] }),
-    );
-    expect(resp.status).toBe(500);
-    expect(rec.captured).toHaveLength(1);
-
-    const netErr = wired({ networkError: true });
-    await expect(
-      netErr.client.chatFetch(KEY)(
-        CHAT_URL,
-        sdkInit({ model: "@cf/m/x", messages: [] }),
-      ),
-    ).rejects.toMatchObject({ code: "network_error", status: 0 });
-
-    const rawNetErr = wired({ networkError: true });
-    await expect(
-      rawNetErr.client.chatFetch(KEY, {
-        nonRetryableErrorMode: "return",
-      })(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] })),
-    ).rejects.toThrowError(TypeError);
-  });
-
-  it("throws a gateway-declared non-retryable error by default", async () => {
-    const { rec, client } = wired(
-      envelope(
-        502,
-        { error: "upstream_service_error", message: "outcome uncertain" },
-        { "x-should-retry": "false" },
-      ),
-    );
-    const err = await client
-      .chatFetch(KEY)(
-        CHAT_URL,
-        sdkInit({ model: "@cf/m/x", messages: [] }),
-      )
-      .catch((e) => e);
-    expect(err).toBeInstanceOf(CailError);
-    expect(err).toMatchObject({
-      code: "upstream_service_error",
-      status: 502,
-      extras: expect.objectContaining({ should_retry: false }),
-    });
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("can return x-should-retry:false responses for SDKs that honor the header", async () => {
-    const { rec, client } = wired(
-      envelope(
-        502,
-        { error: "upstream_service_error", message: "outcome uncertain" },
-        { "x-should-retry": "false" },
-      ),
-    );
-    const response = await client.chatFetch(KEY, {
-      nonRetryableErrorMode: "return",
-    })(CHAT_URL, sdkInit({ model: "@cf/m/x", messages: [] }));
-    expect(response.status).toBe(502);
-    expect(response.headers.get("x-should-retry")).toBe("false");
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("return mode still throws quota_exceeded unless x-should-retry is explicitly false", async () => {
-    const missingHeader = wired(
-      envelope(429, { error: "quota_exceeded", message: "over budget" }),
-    );
-    await expect(
-      missingHeader.client.chatFetch(KEY, {
-        nonRetryableErrorMode: "return",
-      })(CHAT_URL, sdkInit({ model: "m", messages: [] })),
-    ).rejects.toMatchObject({ code: "quota_exceeded", status: 429 });
-
-    const explicitHeader = wired(
-      envelope(
-        429,
-        { error: "quota_exceeded", message: "over budget" },
-        { "x-should-retry": "false" },
-      ),
-    );
-    const response = await explicitHeader.client.chatFetch(KEY, {
-      nonRetryableErrorMode: "return",
-    })(CHAT_URL, sdkInit({ model: "m", messages: [] }));
-    expect(response.status).toBe(429);
-    expect(explicitHeader.rec.captured).toHaveLength(1);
-  });
-
-  it("rejects an invalid nonRetryableErrorMode before fetch", async () => {
-    const { rec, client } = wired(jsonOk({}));
-    await expect(
-      Promise.resolve().then(() =>
-        client.chatFetch(KEY, {
-          nonRetryableErrorMode: "invalid" as "throw",
-        })(CHAT_URL, sdkInit({})),
-      ),
-    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
-    expect(rec.captured).toHaveLength(0);
-  });
-
-  it("V33 401 fires onAuthRequired on a clone; SDK still receives a readable body", async () => {
-    const seen: unknown[] = [];
-    const { client } = wired(
-      envelope(401, {
-        error: "authentication_required",
-        message: "sign in",
-        login_url: "/login",
-      }),
-      { onAuthRequired: (err) => void seen.push(err.code) },
-    );
-    const resp = await client.chatFetch(JWT)(
-      CHAT_URL,
-      sdkInit({ model: "@cf/m/x", messages: [] }),
-    );
-    expect(resp.status).toBe(401);
-    expect(seen).toEqual(["authentication_required"]);
-    expect(((await resp.json()) as any).error.code).toBe(
-      "authentication_required",
-    ); // body intact
-  });
-
-  it("V34 serves ONLY the chat-completions URL — anything else throws before fetch", async () => {
-    const { rec, client } = wired(jsonOk({}));
-    const fetchLike = client.chatFetch(KEY);
-    for (const bad of [
-      `${BASE}/v1/run`,
-      `${BASE}/v1/models`,
-      "https://evil.example/v1/chat/completions",
-    ]) {
-      await expect(fetchLike(bad, sdkInit({}))).rejects.toMatchObject({
-        code: "invalid_request",
-        status: 0,
-      });
-    }
-    expect(rec.captured).toHaveLength(0);
-  });
-
-  it("accepts a Request input and preserves its POST body and headers", async () => {
-    const { rec, client } = wired(jsonOk({ ok: true }));
-    const request = new Request(CHAT_URL, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-sdk-header": "preserved",
-        authorization: "Bearer dummy",
-      },
-      body: JSON.stringify({ model: "m", messages: [] }),
-    });
-    await client.chatFetch(JWT)(request);
-    expect(rec.one.method).toBe("POST");
-    expect(rec.one.body).toBe(JSON.stringify({ model: "m", messages: [] }));
-    expect(rec.one.headers["x-sdk-header"]).toBe("preserved");
-    expect(rec.one.headers["authorization"]).toBeUndefined();
-    expect(rec.one.credentials).toBe("omit");
-  });
-
-  it("accepts a semantically equivalent canonical URL", async () => {
-    const { rec, client } = wired(jsonOk({ ok: true }));
-    await client.chatFetch(KEY)(
-      "https://API.AILAB.EXAMPLE:443/v1/chat/completions",
-      sdkInit({ model: "m", messages: [] }),
-    );
-    expect(rec.one.url).toBe(CHAT_URL);
-  });
-
-  it("requires POST and rejects missing or different methods before fetch", async () => {
-    const { rec, client } = wired(jsonOk({}));
-    for (const init of [undefined, { method: "GET" }, { method: "DELETE" }]) {
-      await expect(client.chatFetch(KEY)(CHAT_URL, init)).rejects.toMatchObject({
-        code: "invalid_request",
-        status: 0,
-      });
-    }
-    expect(rec.captured).toHaveLength(0);
-  });
-
-  it("V35 redirect protection applies in adapter mode (JWT never follows cross-origin)", async () => {
-    const { client } = wired(
-      new Response(null, {
-        status: 302,
-        headers: { location: "https://evil.example/" },
-      }),
-    );
-    await expect(
-      client.chatFetch(JWT)(
-        CHAT_URL,
-        sdkInit({ model: "@cf/m/x", messages: [] }),
-      ),
-    ).rejects.toMatchObject({ code: "unexpected_redirect" });
-  });
-});
-
-// ── Retry safety: non-idempotent generic calls (MDN idempotent methods; ──
-// Stripe idempotent requests; IETF draft-ietf-httpapi-idempotency-key-header)
-
-describe("I5 extension — generic call() never auto-retries a keyless non-idempotent method", () => {
-  it("POST without Idempotency-Key is NOT retried on 5xx (one wire call, typed error)", async () => {
-    const { rec, client } = wired([
-      envelope(500, { error: "server_error", message: "oops" }),
-      jsonOk({ never: "reached" }),
-    ]);
-    await expect(
-      client.call("/keys", { method: "POST" }, JWT),
-    ).rejects.toMatchObject({ code: "server_error", status: 500 });
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("POST without Idempotency-Key is NOT retried on network error", async () => {
-    const { rec, client } = wired([{ networkError: true }, jsonOk({})]);
-    await expect(
-      client.call("/keys", { method: "POST" }, JWT),
-    ).rejects.toMatchObject({ code: "network_error", status: 0 });
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("PATCH without Idempotency-Key is NOT retried on 5xx", async () => {
-    const { rec, client } = wired([
-      envelope(500, { error: "server_error", message: "oops" }),
-      jsonOk({}),
-    ]);
-    await expect(
-      client.call("/keys/k1", { method: "PATCH" }, JWT),
-    ).rejects.toMatchObject({ code: "server_error" });
-    expect(rec.captured).toHaveLength(1);
-  });
-
-  it("an Idempotency-Key alone does not opt a generic POST into retries", async () => {
-    const { rec, client } = wired([
-      envelope(500, { error: "server_error", message: "oops" }),
-      jsonOk({ never: "reached" }),
-    ]);
-    await expect(
-      client.call(
-        "/keys",
-        { method: "POST", headers: { "Idempotency-Key": "caller-key-1" } },
-        JWT,
-      ),
-    ).rejects.toMatchObject({ code: "server_error", status: 500 });
-    expect(rec.captured).toHaveLength(1);
-    expect(rec.captured[0]!.headers["idempotency-key"]).toBe("caller-key-1");
-  });
-
-  it("explicit endpoint-safety opt-in plus a key retries with the same key", async () => {
-    const { rec, client } = wired([
-      envelope(500, { error: "server_error", message: "oops" }),
-      jsonOk({ ok: true }),
-    ]);
-    const resp = await client.call(
-      "/keys",
-      { method: "POST", headers: { "idempotency-key": "caller-key-2" } },
-      JWT,
-      { retryNonIdempotent: true },
-    );
-    expect(resp.status).toBe(200);
-    expect(rec.captured).toHaveLength(2);
-    expect(rec.captured[0]!.headers["idempotency-key"]).toBe("caller-key-2");
-    expect(rec.captured[1]!.headers["idempotency-key"]).toBe("caller-key-2");
-  });
-
-  it("explicit non-idempotent retry without a non-empty key fails before fetch", async () => {
-    for (const headers of [
-      undefined,
-      { "Idempotency-Key": "" },
-      { "Idempotency-Key": "   " },
-    ]) {
-      const { rec, client } = wired(jsonOk({}));
-      await expect(
-        client.call(
-          "/keys",
-          { method: "POST", headers },
-          JWT,
-          { retryNonIdempotent: true },
-        ),
-      ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
-      expect(rec.captured).toHaveLength(0);
-    }
-  });
-
-  it("idempotent methods (GET / DELETE) still retry without a key", async () => {
-    {
-      const { rec, client } = wired([
-        envelope(500, { error: "server_error", message: "oops" }),
-        jsonOk({ ok: true }),
-      ]);
-      const resp = await client.call("/v1/models", { method: "GET" }, KEY);
-      expect(resp.status).toBe(200);
-      expect(rec.captured).toHaveLength(2);
-    }
-    {
-      const { rec, client } = wired([
-        envelope(500, { error: "server_error", message: "oops" }),
-        jsonOk({ ok: true }),
-      ]);
-      const resp = await client.call("/keys/k1", { method: "DELETE" }, JWT);
-      expect(resp.status).toBe(200);
-      expect(rec.captured).toHaveLength(2);
-    }
-  });
-});
-
-// ── Backoff jitter + RFC 9110 Retry-After ─────────────────────────────────
-
-describe("backoff — full jitter (AWS Builders' Library) and RFC 9110 Retry-After", () => {
-  it("first-retry backoff is within the full-jitter bound [0, 200ms]", async () => {
-    vi.useFakeTimers();
-    try {
-      const { rec, client } = wired([
-        envelope(500, { error: "server_error", message: "oops" }),
-        jsonOk({ ok: true }),
-      ]);
-      const pending = client.call("/v1/models", { method: "GET" }, KEY);
-      // Full jitter: delay = random(0, min(2000, 200·2^0)) — advancing the
-      // clock by exactly the 200ms upper bound must release the retry.
-      await vi.advanceTimersByTimeAsync(200);
-      const resp = await pending;
-      expect(resp.status).toBe(200);
-      expect(rec.captured).toHaveLength(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("Retry-After HTTP-date form is honored (RFC 9110 §10.2.3)", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
-    try {
-      const { rec, client } = wired([
-        envelope(
-          503,
-          { error: "server_busy", message: "try later" },
-          { "Retry-After": new Date(Date.now() + 5000).toUTCString() },
-        ),
-        jsonOk({ ok: true }),
-      ]);
-      const pending = client.call("/v1/models", { method: "GET" }, KEY);
-      await vi.advanceTimersByTimeAsync(4500);
-      expect(rec.captured).toHaveLength(1); // still waiting at 4.5s
-      await vi.advanceTimersByTimeAsync(700);
-      const resp = await pending;
-      expect(resp.status).toBe(200);
-      expect(rec.captured).toHaveLength(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("Retry-After HTTP-date in the past clamps to 0 (prompt jittered retry)", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
-    try {
-      const { rec, client } = wired([
-        envelope(
-          503,
-          { error: "server_busy", message: "try later" },
-          { "Retry-After": new Date(Date.now() - 60_000).toUTCString() },
-        ),
-        jsonOk({ ok: true }),
-      ]);
-      const pending = client.call("/v1/models", { method: "GET" }, KEY);
-      await vi.advanceTimersByTimeAsync(200); // jitter bound only
-      const resp = await pending;
-      expect(resp.status).toBe(200);
-      expect(rec.captured).toHaveLength(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("a Retry-After hint above the old 10s cap is honored (20s), not silently shortened", async () => {
-    vi.useFakeTimers();
-    try {
-      const { rec, client } = wired([
-        envelope(
-          503,
-          { error: "server_busy", message: "try later" },
-          { "Retry-After": "20" },
-        ),
-        jsonOk({ ok: true }),
-      ]);
-      const pending = client.call("/v1/models", { method: "GET" }, KEY);
-      await vi.advanceTimersByTimeAsync(19_000);
-      expect(rec.captured).toHaveLength(1); // NOT retried early at 19s
-      await vi.advanceTimersByTimeAsync(1_200);
-      const resp = await pending;
-      expect(resp.status).toBe(200);
-      expect(rec.captured).toHaveLength(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("a Retry-After hint beyond the 30s ceiling is capped at 30s", async () => {
-    vi.useFakeTimers();
-    try {
-      const { rec, client } = wired([
-        envelope(
-          503,
-          { error: "server_busy", message: "try later" },
-          { "Retry-After": "300" },
-        ),
-        jsonOk({ ok: true }),
-      ]);
-      const pending = client.call("/v1/models", { method: "GET" }, KEY);
-      await vi.advanceTimersByTimeAsync(29_000);
-      expect(rec.captured).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(1_200);
-      const resp = await pending;
-      expect(resp.status).toBe(200);
-      expect(rec.captured).toHaveLength(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("a malformed Retry-After falls back to the jittered backoff", async () => {
-    vi.useFakeTimers();
-    try {
-      const { rec, client } = wired([
-        envelope(
-          503,
-          { error: "server_busy", message: "try later" },
-          { "Retry-After": "soonish" },
-        ),
-        jsonOk({ ok: true }),
-      ]);
-      const pending = client.call("/v1/models", { method: "GET" }, KEY);
-      await vi.advanceTimersByTimeAsync(200);
-      const resp = await pending;
-      expect(resp.status).toBe(200);
-      expect(rec.captured).toHaveLength(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-// ── Construction-time validation + UUID fallback ──────────────────────────
-
-describe("construction — baseUrl trust boundary", () => {
-  it("rejects malformed and unsafe base URLs at construction", () => {
-    for (const bad of [
-      "not a url",
-      "example.com/api",
-      "http://",
-      "/relative",
-      "javascript:alert(1)",
-      "file:///tmp/cail",
-      "data:text/plain,secret",
-      "http://api.ailab.example",
-      "http://localhost:8787",
-      "https://user:pass@api.ailab.example",
-      "https://api.ailab.example?tenant=one",
-      "https://api.ailab.example#fragment",
-    ]) {
-      let err: unknown = null;
-      try {
-        createCailClient({
-          baseUrl: bad,
-          app: APP,
-          fetchImpl: recordingFetch(jsonOk({})).fn,
-        });
-      } catch (e) {
-        err = e;
-      }
-      expect(err, `baseUrl=${JSON.stringify(bad)} must throw`).toBeInstanceOf(
-        CailError,
-      );
-      expect((err as CailError).code).toBe("invalid_config");
-      expect((err as CailError).status).toBe(0);
-    }
-  });
-
-  it("accepts and normalizes an HTTPS base URL", async () => {
-    const rec = recordingFetch(jsonOk({}));
-    const client = createCailClient({
-      baseUrl: "https://API.AILAB.EXAMPLE:443/gateway///",
-      app: APP,
-      fetchImpl: rec.fn,
-    });
-    await client.call("/v1/models", {}, JWT);
-    expect(rec.one.url).toBe("https://api.ailab.example/gateway/v1/models");
-  });
-
-  it("allows plaintext only for exact loopback hosts with explicit opt-in", async () => {
-    for (const host of ["localhost", "127.0.0.1", "[::1]"]) {
-      const rec = recordingFetch(jsonOk({}));
-      const client = createCailClient({
-        baseUrl: `http://${host}:8787/`,
-        app: APP,
-        fetchImpl: rec.fn,
+  it("allows explicit loopback HTTP for local proofs", () => {
+    expect(() =>
+      createCailClient({
+        baseUrl: "http://127.0.0.1:4000/v1/",
+        app: "proof",
         allowInsecureLoopback: true,
-      });
-      await client.call("/v1/models", {}, JWT);
-      expect(rec.one.url).toBe(`http://${host}:8787/v1/models`);
-    }
-
-    for (const bad of [
-      "http://localhost.evil.example:8787",
-      "http://127.0.0.2:8787",
-      "http://[::2]:8787",
-      "http://2130706433:8787",
-      "http://0177.0.0.1:8787",
-      "http://0x7f000001:8787",
-      "http://[0:0:0:0:0:0:0:1]:8787",
-    ]) {
-      expect(() =>
-        createCailClient({
-          baseUrl: bad,
-          app: APP,
-          fetchImpl: recordingFetch(jsonOk({})).fn,
-          allowInsecureLoopback: true,
-        }),
-      ).toThrowError(CailError);
-    }
-  });
-
-  it("validates security opt-ins as booleans", () => {
-    for (const field of ["allowInsecureLoopback", "allowAmbientCredentials"] as const) {
-      expect(() =>
-        createCailClient({
-          baseUrl: BASE,
-          app: APP,
-          fetchImpl: recordingFetch(jsonOk({})).fn,
-          [field]: "yes",
-        } as unknown as Parameters<typeof createCailClient>[0]),
-      ).toThrowError(CailError);
-    }
-  });
-
-  it("a well-formed HTTPS baseUrl is accepted", () => {
-    expect(() =>
-      createCailClient({
-        baseUrl: "https://api.ailab.example/",
-        app: APP,
-        fetchImpl: recordingFetch(jsonOk({})).fn,
       }),
     ).not.toThrow();
   });
+
+  it("validates the application slug and bearer token", async () => {
+    expect(() =>
+      createCailClient({ baseUrl, app: "Agent Studio" }),
+    ).toThrow("app must match");
+
+    const client = clientWith(vi.fn());
+    await expect(client.models("has a space")).rejects.toThrow("bearer token");
+  });
 });
 
-describe("run() idempotency key — non-secure-context fallback + caller override", () => {
-  it("mints a v4 Idempotency-Key even when crypto.randomUUID is unavailable", async () => {
-    const real = globalThis.crypto;
-    // Browser non-secure contexts expose getRandomValues but NOT randomUUID.
-    vi.stubGlobal("crypto", {
-      getRandomValues: <T extends ArrayBufferView | null>(arr: T): T =>
-        real.getRandomValues(arr as never) as T,
+describe("wire contract", () => {
+  it("uses bearer auth and the configured app header", async () => {
+    const fetchImpl = vi.fn(async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe(`Bearer ${token}`);
+      expect(headers.get("x-cail-identity-jwt")).toBeNull();
+      expect(headers.get("x-cail-app")).toBe("agent-studio");
+      expect(init?.credentials).toBe("omit");
+      expect(init?.redirect).toBe("manual");
+      return new Response('{"object":"list","data":[]}', { status: 200 });
     });
-    try {
-      const { rec, client } = wired(jsonOk({ ok: true }));
-      await client.run({ model: "@cf/m/x", input: "hi" }, KEY);
-      expect(rec.one.headers["idempotency-key"]).toMatch(
-        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-      );
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    const client = clientWith(fetchImpl as typeof fetch);
+
+    const response = await client.request(
+      "models",
+      {
+        headers: {
+          authorization: "Bearer SDK-DUMMY",
+          "x-cail-identity-jwt": "legacy",
+          "x-cail-app": "spoofed",
+        },
+      },
+      token,
+    );
+
+    expect(response.status).toBe(200);
+    expect(String(fetchImpl.mock.calls[0]![0])).toBe(`${baseUrl}/models`);
   });
 
-  it("caller-supplied options.idempotencyKey reaches the wire and is stable across retries", async () => {
-    const { rec, client } = wired([
-      { networkError: true },
-      jsonOk({ ok: true }),
+  it("exchanges a CAIL identity JWT and sends only the native key to /v1", async () => {
+    const seen: Array<{ url: string; authorization: string | null }> = [];
+    const fetchImpl = vi.fn(async (input, init) => {
+      const url = String(input);
+      const authorization = new Headers(init?.headers).get("authorization");
+      seen.push({ url, authorization });
+      if (url.endsWith("/cail/auth/exchange")) {
+        expect(new Headers(init?.headers).get("x-cail-app")).toBe(
+          "agent-studio",
+        );
+        return Response.json({
+          access_token: "sk-native-session",
+          token_type: "Bearer",
+          expires_at: "2099-01-01T00:00:00Z",
+        });
+      }
+      return Response.json({ object: "list", data: [] });
+    });
+    const firstClient = clientWith(fetchImpl as typeof fetch);
+    const secondClient = clientWith(fetchImpl as typeof fetch);
+
+    const [first, second] = await Promise.all([
+      firstClient.models(identityJwt),
+      secondClient.models(identityJwt),
     ]);
-    const resp = await client.run(
-      { model: "@cf/m/x", input: { prompt: "hi" } },
-      KEY,
-      { idempotencyKey: "11111111-1111-4111-8111-111111111111" },
-    );
-    expect(resp.status).toBe(200);
-    expect(rec.captured).toHaveLength(2);
-    expect(rec.captured[0]!.headers["idempotency-key"]).toBe(
-      "11111111-1111-4111-8111-111111111111",
-    );
-    expect(rec.captured[1]!.headers["idempotency-key"]).toBe(
-      "11111111-1111-4111-8111-111111111111",
-    );
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect((await firstClient.models(identityJwt)).status).toBe(200);
+
+    expect(seen).toEqual([
+      {
+        url: "https://models.example.edu/openai/cail/auth/exchange",
+        authorization: `Bearer ${identityJwt}`,
+      },
+      {
+        url: `${baseUrl}/models`,
+        authorization: "Bearer sk-native-session",
+      },
+      {
+        url: `${baseUrl}/models`,
+        authorization: "Bearer sk-native-session",
+      },
+      {
+        url: `${baseUrl}/models`,
+        authorization: "Bearer sk-native-session",
+      },
+    ]);
   });
 
-  it("invalid options.idempotencyKey throws before fetch", async () => {
-    const { rec, client } = wired(jsonOk({}));
-    for (const bad of [
-      "",
-      "app-restart-safe-key-1",
-      "11111111-1111-1111-8111-111111111111",
-      "11111111-1111-4111-7111-111111111111",
-      "11111111-1111-4111-8111-11111111111g",
-      "11111111-1111-4111-8111-111111111111\r",
-    ]) {
-      await expect(
-        client.run({ model: "@cf/m/x", input: "hi" }, KEY, {
-          idempotencyKey: bad,
+  it("surfaces a typed exchange failure without sending a model request", async () => {
+    const fetchImpl = vi.fn(async () =>
+      Response.json(
+        {
+          error: {
+            message: "A valid CAIL identity is required.",
+            code: "authentication_required",
+          },
+        },
+        { status: 401 },
+      ),
+    );
+    const client = clientWith(fetchImpl as typeof fetch);
+
+    await expect(
+      client.models({
+        kind: "identity-jwt",
+        token: `${identityJwt}.different`,
+      }),
+    ).rejects.toMatchObject({
+      status: 401,
+      code: "authentication_required",
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the identity JWT only on native key-management routes", async () => {
+    const fetchImpl = vi.fn(async (input, init) => {
+      expect(String(input)).toBe(
+        "https://models.example.edu/openai/cail/keys",
+      );
+      expect(new Headers(init?.headers).get("authorization")).toBe(
+        `Bearer ${identityJwt}`,
+      );
+      return Response.json(
+        {
+          id: "hash",
+          key: "sk-native-personal",
+          name: "Notebook",
+          expires_at: null,
+        },
+        { status: 201 },
+      );
+    });
+    const client = clientWith(fetchImpl as typeof fetch);
+
+    const response = await client.createPersonalKey(identityJwt, "Notebook");
+    expect(response.status).toBe(201);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes every standard OpenAI endpoint beneath /v1", async () => {
+    const urls: string[] = [];
+    const fetchImpl = vi.fn(async (input) => {
+      urls.push(String(input));
+      return new Response(null, { status: 204 });
+    });
+    const client = clientWith(fetchImpl as typeof fetch);
+
+    await client.request("responses", { method: "POST" }, token);
+    await client.request("/embeddings", { method: "POST" }, token);
+    await client.request("images/generations", { method: "POST" }, token);
+
+    expect(urls).toEqual([
+      `${baseUrl}/responses`,
+      `${baseUrl}/embeddings`,
+      `${baseUrl}/images/generations`,
+    ]);
+  });
+
+  it("returns non-2xx responses untouched", async () => {
+    const original = new Response(
+      JSON.stringify({
+        error: { message: "Budget exceeded", type: "budget_exceeded" },
+      }),
+      { status: 429, headers: { "content-type": "application/json" } },
+    );
+    const client = clientWith(
+      vi.fn(async () => original) as unknown as typeof fetch,
+    );
+
+    const result = await client.models(token);
+    expect(result).toBe(original);
+    expect(result.status).toBe(429);
+    expect(await result.json()).toEqual({
+      error: { message: "Budget exceeded", type: "budget_exceeded" },
+    });
+  });
+
+  it("returns streaming bodies without buffering or replacement", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(
+            'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
+          ),
+        );
+        controller.close();
+      },
+    });
+    const original = new Response(body, {
+      headers: { "content-type": "text/event-stream" },
+    });
+    const client = clientWith(
+      vi.fn(async () => original) as unknown as typeof fetch,
+    );
+
+    const result = await client.chatCompletions(
+      { model: "cail/default", messages: [], stream: true },
+      token,
+    );
+    expect(result).toBe(original);
+    expect(result.body).toBe(body);
+    expect(await result.text()).toContain('"content":"Hi"');
+  });
+
+  it("passes AbortSignal through to the transport", async () => {
+    const fetchImpl = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(init.signal?.reason),
+            { once: true },
+          );
         }),
-      ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
-    }
-    expect(rec.captured).toHaveLength(0);
+    );
+    const client = clientWith(fetchImpl as typeof fetch);
+    const controller = new AbortController();
+
+    const pending = client.chatCompletions(
+      { model: "cail/default", messages: [] },
+      token,
+      { signal: controller.signal },
+    );
+    controller.abort(new Error("caller cancelled"));
+
+    await expect(pending).rejects.toThrow("caller cancelled");
+    expect(fetchImpl.mock.calls[0]![1]?.signal).toBe(controller.signal);
+  });
+
+  it("does not follow redirects carrying the bearer token", async () => {
+    const fetchImpl = vi.fn(async (_input, init) => {
+      expect(init?.redirect).toBe("manual");
+      return new Response(null, {
+        status: 302,
+        headers: { location: "https://attacker.example/collect" },
+      });
+    });
+    const client = clientWith(fetchImpl as typeof fetch);
+
+    const response = await client.models(token);
+    expect(response.status).toBe(302);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 
-// ── recording mock — over-calling guard ───────────────────────────────────
+describe("OpenAI SDK fetch adapter", () => {
+  it("serves normal external OpenAI-compatible paths under the base", async () => {
+    const fetchImpl = vi.fn(async (input, init) => {
+      expect(String(input)).toBe(`${baseUrl}/chat/completions`);
+      expect(new Headers(init?.headers).get("authorization")).toBe(
+        `Bearer ${token}`,
+      );
+      return new Response("{}", { status: 200 });
+    });
+    const openAIFetch = clientWith(
+      fetchImpl as typeof fetch,
+    ).openAIFetch(token);
 
-describe("recording mock — over-calling guard", () => {
-  it("a call beyond the queued responses throws (never silently reuses the last response)", async () => {
-    const rec = recordingFetch(jsonOk({ ok: true }));
-    const first = await rec.fn("https://x.example/one", { method: "GET" });
-    expect(first.status).toBe(200);
+    await openAIFetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { authorization: "Bearer unused-sdk-key" },
+      body: "{}",
+    });
+  });
+
+  it("supports Request objects without buffering their bodies", async () => {
+    const fetchImpl = vi.fn(async (_input, init) => {
+      expect(init?.body).toBeInstanceOf(ReadableStream);
+      expect((init as RequestInit & { duplex?: string }).duplex).toBe("half");
+      return new Response(null, { status: 204 });
+    });
+    const openAIFetch = clientWith(
+      fetchImpl as typeof fetch,
+    ).openAIFetch(token);
+    const request = new Request(`${baseUrl}/responses`, {
+      method: "POST",
+      body: "{}",
+    });
+
+    await openAIFetch(request);
+  });
+
+  it("rejects cross-origin, traversal, and paths outside /v1", async () => {
+    const fetchImpl = vi.fn();
+    const client = clientWith(fetchImpl);
+    const openAIFetch = client.openAIFetch(token);
+
     await expect(
-      rec.fn("https://x.example/two", { method: "GET" }),
-    ).rejects.toThrow(/unexpected call #2/);
+      openAIFetch("https://attacker.example/v1/chat/completions"),
+    ).rejects.toThrow("only the configured");
+    await expect(
+      openAIFetch("https://models.example.edu/openai/v10/chat/completions"),
+    ).rejects.toThrow("only the configured");
+    await expect(
+      client.request("../admin", undefined, token),
+    ).rejects.toThrow("beneath");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

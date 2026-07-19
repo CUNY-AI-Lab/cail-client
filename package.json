@@ -1,7 +1,7 @@
 {
   "name": "@cuny-ai-lab/cail-client",
-  "version": "1.1.0",
-  "description": "The CAIL model-proxy API client for CUNY applications: a pure Web-standard fetch wrapper that owns the user-bound credential, header, error, and retry contract. Runs unchanged in the browser, Cloudflare Workers, and Node >=20.",
+  "version": "2.0.0",
+  "description": "A small Web-standard bearer-token client for CAIL's OpenAI-compatible LiteLLM endpoint.",
   "type": "module",
   "license": "MIT",
   "sideEffects": false,
@@ -28,9 +28,6 @@
     "test:watch": "vitest",
     "prepublishOnly": "bun run build",
     "prepare": "bun run build"
-  },
-  "dependencies": {
-    "@cuny-ai-lab/cail-log": "github:CUNY-AI-Lab/cail-log#75e0dda3068794ae1543e1e2bb98c9c920bb848f"
   },
   "devDependencies": {
     "@types/node": "^20.17.6",
