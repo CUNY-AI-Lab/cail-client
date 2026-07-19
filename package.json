@@ -40,5 +40,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/CUNY-AI-Lab/cail-client.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
   }
 }
