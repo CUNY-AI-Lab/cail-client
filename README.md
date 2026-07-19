@@ -14,12 +14,19 @@ that span producer and consumer.
 
 ## Install
 
-Build output is committed, so Git consumers do not build during installation.
-Pin a reviewed commit for reproducibility:
+The package is published to GitHub Packages under the `@cuny-ai-lab` scope.
+Add the registry mapping to the consuming repository's `.npmrc` (resolution
+only — never commit a token):
 
-```bash
-bun add github:CUNY-AI-Lab/cail-client#<reviewed-commit>
 ```
+@cuny-ai-lab:registry=https://npm.pkg.github.com
+```
+
+Pin a semver range, for example `"@cuny-ai-lab/cail-client": "^1.1.0"`, then
+run `bun install` with `NODE_AUTH_TOKEN` set in the environment to a GitHub
+PAT that has `read:packages` (supplied by a user-level `~/.npmrc` or a CI
+secret). Maintainers publish with `npm publish`; `bun publish` does not
+authenticate against GitHub Packages.
 
 ## Construct a client
 
