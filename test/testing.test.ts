@@ -198,6 +198,13 @@ describe("quotaHeaders", () => {
 });
 
 describe("published testing subpath", () => {
+  it("resolves the package root through the exports map", async () => {
+    const viaPackage = await import("@cuny-ai-lab/cail-client");
+    expect(viaPackage.createCailClient).toBeTypeOf("function");
+    expect(viaPackage.parseCailError).toBeTypeOf("function");
+    expect(viaPackage.extractCailError).toBeTypeOf("function");
+  });
+
   it("resolves @cuny-ai-lab/cail-client/testing via the exports map", async () => {
     const viaPackage = await import("@cuny-ai-lab/cail-client/testing");
     expect(viaPackage.quotaExceededEnvelope).toBeTypeOf("function");

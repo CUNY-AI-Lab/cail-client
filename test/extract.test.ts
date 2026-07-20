@@ -45,6 +45,8 @@ describe("extractCailError", () => {
     expect(extracted?.message).toBe("Hourly quota exhausted");
     expect(extracted?.status).toBe(429); // adopted from the wrapper's statusCode
     expect(extracted?.extras["retry_after_seconds"]).toBe(3600);
+    expect(extracted?.extras["retry_after"]).toBe("3600");
+    expect(extracted?.extras["should_retry"]).toBe(false);
   });
 
   it("descends mixed errors[] arrays and string-JSON data layers together", () => {
@@ -207,5 +209,60 @@ describe("extractCailError", () => {
     a["errors"] = [b, a];
 
     expect(extractCailError(a)).toBeNull();
+  });
+
+  it("preserves only validated response metadata from the nearest SDK wrapper", () => {
+    const extracted = extractCailError({
+      statusCode: 503,
+      responseHeaders: {
+        "x-request-id": "11111111-1111-4111-8111-111111111111",
+        "x-should-retry": "true",
+        "retry-after": "7",
+        authorization: "Bearer must-not-be-copied",
+      },
+      responseBody: JSON.stringify({
+        error: {
+          message: "Try again later.",
+          type: "server_error",
+          param: null,
+          code: "models_unavailable",
+        },
+      }),
+    });
+
+    expect(extracted?.extras).toEqual({
+      request_id: "11111111-1111-4111-8111-111111111111",
+      should_retry: true,
+      retry_after: "7",
+    });
+  });
+
+  it("adds validated wrapper retry metadata to a nested live CailError", () => {
+    const live = new CailError(
+      "upstream_service_error",
+      "The outcome is uncertain.",
+      502,
+    );
+    const extracted = extractCailError({
+      responseHeaders: {
+        "x-request-id": "55555555-5555-4555-8555-555555555555",
+        "x-should-retry": "false",
+      },
+      lastError: live,
+    });
+
+    expect(extracted).toBe(live);
+    expect(extracted?.extras).toEqual({
+      request_id: "55555555-5555-4555-8555-555555555555",
+      should_retry: false,
+    });
+  });
+
+  it("does not JSON-parse oversized SDK wrapper strings", () => {
+    const oversized = JSON.stringify({
+      ...QUOTA_ENVELOPE,
+      padding: "x".repeat(300_000),
+    });
+    expect(extractCailError(oversized)).toBeNull();
   });
 });

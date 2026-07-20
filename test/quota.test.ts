@@ -15,7 +15,7 @@ const BASE = "https://api.ailab.example";
 const APP = "alt-text";
 const KEY: CailCredential = { kind: "key", token: "sk-cail-xyz" };
 const VECTORS_SHA256 =
-  "c521fc0744efcac9fbc68d89cf0f7600a9a7a1099bbe9bd99cdb4b84cd50ffce";
+  "b08ca31a4cf146aa9331e531ca0d03328005a15851f465bd2233481c955cea5e";
 
 const vectorsUrl = new URL("./quota-wire-vectors.json", import.meta.url);
 const vectorsBytes = readFileSync(vectorsUrl);
@@ -49,7 +49,10 @@ interface QuotaWireVectors {
 
 const vectors = JSON.parse(vectorsText) as QuotaWireVectors;
 
-function clientFor(response: Response, maxRetries = 2) {
+function clientFor(
+  response: Parameters<typeof recordingFetch>[0],
+  maxRetries = 2,
+) {
   const rec = recordingFetch(response);
   const client = createCailClient({
     baseUrl: BASE,
@@ -107,20 +110,125 @@ describe("quota wire vectors", () => {
     });
   }
 
-  it("getQuota surfaces a persistent 503 without retrying", async () => {
-    const { rec, client } = clientFor(
-      envelope(503, {
-        error: "quota_unavailable",
-        message: "The quota meter is unavailable.",
-      }),
-    );
+  it("getQuota retries a persistent retryable 503 once, then surfaces it", async () => {
+    const unavailable = () =>
+      envelope(
+        503,
+        {
+          error: "quota_unavailable",
+          message: "The quota meter is unavailable.",
+        },
+        { "x-should-retry": "true" },
+      );
+    const { rec, client } = clientFor([unavailable(), unavailable()]);
 
     const err = await client.getQuota(KEY).catch((e) => e);
 
     expect(err).toBeInstanceOf(CailError);
     expect(err.code).toBe("quota_unavailable");
     expect(err.status).toBe(503);
+    expect(rec.captured).toHaveLength(2);
+  });
+
+  it("getQuota honors maxRetries: 0 and a gateway non-retryable decision", async () => {
+    {
+      const { rec, client } = clientFor(
+        envelope(
+          503,
+          {
+            error: "quota_unavailable",
+            message: "The quota meter is unavailable.",
+          },
+          { "x-should-retry": "true" },
+        ),
+        0,
+      );
+      await client.getQuota(KEY).catch(() => {});
+      expect(rec.captured).toHaveLength(1);
+    }
+    {
+      const { rec, client } = clientFor(
+        envelope(
+          503,
+          {
+            error: "quota_configuration_error",
+            message: "The quota read boundary is unavailable.",
+          },
+          { "x-should-retry": "false" },
+        ),
+      );
+      await client.getQuota(KEY).catch(() => {});
+      expect(rec.captured).toHaveLength(1);
+    }
+  });
+
+  it("getQuota forwards cancellation and preserves the abort reason", async () => {
+    const reason = new DOMException("quota read cancelled", "AbortError");
+    const controller = new AbortController();
+    const { rec, client } = clientFor({ abortableHang: true });
+    const pending = client.getQuota(KEY, { signal: controller.signal });
+    controller.abort(reason);
+
+    await expect(pending).rejects.toBe(reason);
     expect(rec.captured).toHaveLength(1);
+  });
+
+  it("getQuota preserves cancellation while parsing its bounded body", async () => {
+    const controller = new AbortController();
+    const reason = new DOMException("quota body cancelled", "AbortError");
+    const fetchImpl = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(streamController) {
+          init?.signal?.addEventListener(
+            "abort",
+            () => streamController.error(new TypeError("transport wrapper")),
+            { once: true },
+          );
+        },
+      });
+      return new Response(body, { status: 200 });
+    }) as typeof fetch;
+    const client = createCailClient({
+      baseUrl: BASE,
+      app: APP,
+      fetchImpl,
+    });
+
+    const pending = client.getQuota(KEY, { signal: controller.signal });
+    controller.abort(reason);
+    await expect(pending).rejects.toBe(reason);
+  });
+
+  it("rejects malformed read-through identity and unit fields", async () => {
+    const valid = {
+      object: "quota",
+      subject: "cail-11111111111111111111111111111111",
+      unit: "microdollar",
+      currency: "USD",
+      window_seconds: 2_592_000,
+      limit: 10_000_000,
+      used: 630_000,
+      remaining: 9_370_000,
+      reset: 1_723_200_000,
+      as_of: 1_720_600_000,
+      state: "ok",
+      enforced: true,
+    };
+    for (const body of [
+      { ...valid, subject: "legacy-or-untrusted-subject" },
+      { ...valid, unit: "dollar" },
+      { ...valid, currency: "EUR" },
+      { ...valid, remaining: 123 },
+      { ...valid, window_seconds: 0 },
+    ]) {
+      const { client } = clientFor(jsonOk(body), 0);
+      await expect(client.getQuota(KEY)).rejects.toMatchObject({
+        code: "unknown_error",
+      });
+    }
   });
 
   it("parseQuotaHeaders returns null when no quota headers are present", () => {

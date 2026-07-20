@@ -1,10 +1,12 @@
 # @cuny-ai-lab/cail-client
 
 The shared Web-standard client for CUNY applications that use the CAIL
-gateway. It forwards exactly one user-bound CAIL credential, stamps app
-attribution and validated optional metadata, preserves quota information, and
-turns gateway error envelopes into typed errors. It runs in browsers, Workers,
-and Node 20 or newer. Its only runtime dependency is `@cuny-ai-lab/cail-log`.
+gateway. On authenticated calls it forwards exactly one CAIL credential,
+stamps app attribution and validated optional metadata, and turns gateway
+error envelopes into typed errors. It also exposes the gateway's deliberately
+public model catalog without private headers. It runs in browsers, Workers,
+and Node 20 or newer. Its only runtime dependency is
+`@cuny-ai-lab/cail-log`.
 
 This package is an outbound transport helper. The gateway and each tool retain
 their inbound identity, authorization, tenant-isolation, origin, and CSRF
@@ -12,21 +14,48 @@ boundaries. This README is the canonical package guide; the CAIL Gateway
 repository's `docs/INTEGRATION.md` is the canonical wire contract for changes
 that span producer and consumer.
 
+## Boundary and invariants
+
+Trusted configuration (`baseUrl` and `app`), one caller-supplied credential,
+and request data enter the authenticated boundary. A Web `Response` or typed
+`CailError` leaves it. The public catalog is the sole zero-credential path.
+
+- The client is not an identity verifier, authorization layer, provider-key
+  holder, quota source, or logging system.
+- Authenticated calls send one credential family and client-owned headers
+  override caller copies. Public catalog calls send none of those headers.
+- Paths stay on the configured origin and inside its base path. Redirects are
+  never followed.
+- `run()` owns buffered model idempotency. Chat and SSE calls are
+  single-attempt.
+- Successful response bodies, including SSE, pass through untouched. Only
+  client-owned error and quota parsing is bounded.
+- The client emits no logs and never puts credentials or raw response bodies
+  in its own errors.
+
 ## Install
 
 The package is published to GitHub Packages under the `@cuny-ai-lab` scope.
-Add the registry mapping to the consuming repository's `.npmrc` (resolution
-only — never commit a token):
+Add the registry mapping and environment-variable interpolation to the
+consuming repository's `.npmrc`. Never place an actual token in this file:
 
 ```
 @cuny-ai-lab:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
 ```
 
-Pin a semver range, for example `"@cuny-ai-lab/cail-client": "^1.1.0"`, then
+Pin a semver range, for example `"@cuny-ai-lab/cail-client": "^1.4.0"`, then
 run `bun install` with `NODE_AUTH_TOKEN` set in the environment to a GitHub
 PAT that has `read:packages` (supplied by a user-level `~/.npmrc` or a CI
-secret). Maintainers publish with `npm publish`; `bun publish` does not
-authenticate against GitHub Packages.
+secret). Bun 1.3.5 reads the registry and token interpolation from `.npmrc`;
+the npm CLI is not required.
+
+Maintainers keep authentication outside the repository, set
+`NODE_AUTH_TOKEN` to a classic GitHub PAT with `write:packages`, verify with
+`bun publish --dry-run`, and release with `bun publish`. Both commands invoke
+the complete `prepublishOnly` gate and require a clean worktree before any
+registry mutation. GitHub Actions may instead use a repository `GITHUB_TOKEN`
+with `packages: write`.
 
 ## Construct a client
 
@@ -78,9 +107,11 @@ try {
 }
 ```
 
-Server and background work may pass a personal or delegated CAIL key. Both are
-charged to the owning CUNY user's quota; delegated keys are short-lived and
-app-locked.
+Server and background work may pass a personal, delegated, or app-principal
+CAIL key. All use the `sk-cail-…` family. The gateway resolves the key to its
+canonical user (`cail-…`) or application (`app-…`) subject and enforces its
+policy. Delegated keys are short-lived and app-locked. App-principal deployment
+state and key rotation remain application responsibilities.
 
 ```ts
 const response = await cail.run(
@@ -90,9 +121,10 @@ const response = await cail.run(
 );
 ```
 
-The successful `Response` is returned by reference. Use
-`parseQuotaHeaders(response.headers)` to read advisory quota headers without
-buffering or changing the body.
+The successful `Response` is returned by reference. The current gateway does
+not emit the former `X-CAIL-Quota-*` advisory headers.
+`parseQuotaHeaders(response.headers)` remains available for compatibility with
+recorded and older responses and returns `null` when those headers are absent.
 
 `run()` is buffered. For streaming chat, use `chatCompletions()`.
 
@@ -120,8 +152,9 @@ const response = await cail.chatCompletions(
 ```
 
 Extra OpenAI parameters such as `temperature` and `tools` pass through
-verbatim. The gateway owns streamed usage metering; the client does not rewrite
-the request or successful response body.
+verbatim. The gateway may add usage fields for bounded diagnostics, while
+Cloudflare AI Gateway owns accounting and enforcement. The client does not
+rewrite the request or successful response body.
 
 ### OpenAI-compatible SDK adapter
 
@@ -176,11 +209,21 @@ retries disabled under the fleet policy.
 
 ## Other gateway endpoints
 
-`call()` is available for non-model endpoints such as `/v1/models` and key
-delegation. It rejects the two model routes, which belong to `run()` and
-`chatCompletions()`. Do not pass a path taken directly from user input; the
-client joins the path to the configured base URL but does not maintain an
-endpoint allowlist.
+`getCatalog()` reads the public `GET /v1/catalog` model catalog without a
+credential, app attribution, metadata, correlation, cookies, or ambient
+browser credentials. The optional facet is `"text"`, `"image"`, or `"all"`.
+
+```ts
+const publicCatalog = await cail.getCatalog({ modality: "all" });
+```
+
+`call()` is available for authenticated non-model endpoints such as
+`/v1/models`, `/quota`, and key delegation. It rejects model invocation and the
+public catalog, which belong to their dedicated methods. Paths must be
+gateway-relative, contain no fragment, backslash, control character, or
+whitespace, and remain inside the configured base path after URL
+normalization. Do not pass a path taken directly from user input; `call()` does
+not maintain a general endpoint allowlist.
 
 ```ts
 const response = await cail.call("/v1/models", { method: "GET" }, credential);
@@ -199,7 +242,8 @@ The client enforces these wire rules:
   Reserved identity and prototype-pollution keys are rejected.
 
 The gateway derives the subject from the verified JWT or CAIL key, authorizes
-the request, enforces delegated-key app locks, and charges quota.
+the request, and enforces delegated-key app locks. Cloudflare AI Gateway
+partitions accounting and budget enforcement by the canonical subject.
 `X-CAIL-App` records app attribution. The current gateway ignores
 `X-CAIL-Metadata`, so project, course, and purpose values are not authoritative
 gateway spend dimensions.
@@ -216,10 +260,11 @@ const cail = createCailClient({
 });
 ```
 
-Use session JWTs in browser code. Never embed a personal or delegated key in a
-browser bundle or local storage. The package does not provide CSRF or origin
-checks. Custom CAIL headers also trigger CORS preflight on cross-origin browser
-calls; the gateway must allow the origin, method, and headers.
+Use session JWTs in browser code. Never embed a personal, delegated, or
+app-principal key in a browser bundle or local storage. The package does not
+provide CSRF or origin checks. Custom CAIL headers also trigger CORS preflight
+on cross-origin browser calls; the gateway must allow the origin, method, and
+headers. `getCatalog()` avoids that preflight by sending only `Accept`.
 
 The default browser 401 hook accepts only a same-origin `login_url` and falls
 back to `/login` on the application's origin. A different login origin needs a
@@ -236,7 +281,7 @@ UUID v4 values. Malformed correlation fails before fetch. The package
 re-exports the cail-log correlation functions, types, and all three header
 constants. Its logging schema-v2, versioned-subject, and event-provenance APIs
 remain logger concerns; this transport does not construct or reinterpret log
-events or quota subjects.
+events or quota subjects. The client itself emits no logs.
 
 ## Errors, retries, and ambiguous outcomes
 
@@ -251,9 +296,12 @@ reuses it for every attempt. A caller may supply a UUID v4 through
 `options.idempotencyKey` to deduplicate the same logical run across its own
 restart. The gateway's durable claim/replay contract makes those retries safe.
 
-`chatCompletions()` is always single-attempt. Direct calls also do not retry
-ordinary 4xx responses, aborted requests, one-shot stream bodies, or responses
-with `x-should-retry: false`. `getQuota()` is single-attempt, including on 5xx.
+`chatCompletions()` and `chatFetch()` are always single-attempt. Direct calls
+also do not retry ordinary 4xx responses, aborted requests, one-shot stream
+bodies, or responses with `x-should-retry: false`. The safe public catalog uses
+the normal idempotent-GET retry policy. `getQuota()` caps retryable network/5xx
+read-through failures at one retry, even when the client's `maxRetries` is
+higher; `maxRetries: 0` and `x-should-retry: false` still disable it.
 
 Generic non-idempotent `call()` requests are single-attempt even when they
 carry an `Idempotency-Key`. Retrying one requires both a non-empty key and the
@@ -276,18 +324,35 @@ are honored up to a 30-second ceiling. A larger hint is capped at 30 seconds;
 the caller must handle longer recovery windows outside this transport.
 
 Cancellation cannot prove that a model request was not accepted or billed.
-Treat the outcome as ambiguous unless the gateway's idempotency replay
-contract resolves it.
+Treat the outcome as ambiguous. A stable `run()` idempotency key lets the
+gateway's durable claim/replay contract resolve a later replay; chat has no
+equivalent replay contract.
 
 ## Cancellation and streaming ownership
 
 `CailCallOptions.signal` works with `call()`, `run()`,
 `chatCompletions()`, and `chatFetch()`. It takes precedence over an
 `init.signal`. Aborts preserve the original abort reason and are never retried.
+`getCatalog()` and `getQuota()` accept the same kind of signal. The package
+sets no implicit request deadline; callers that need one should pass
+`AbortSignal.timeout(...)` or an `AbortController`.
 
 Successful responses are returned by reference. The caller owns consuming and
 cancelling a streaming response body when its browser request, Worker request,
-or server connection closes.
+or server connection closes. The client imposes no size limit on successful
+model or SSE bodies because it does not consume them. Direct error and quota
+bodies are limited to 64 KiB before parsing. `extractCailError()` refuses
+already-buffered SDK JSON strings over 256 KiB.
+
+## Quota read-through
+
+`getQuota()` reads the authenticated user or app subject's current stateless
+Cloudflare AI Gateway snapshot. It validates the canonical subject, fixed
+`microdollar`/`USD` units, safe integer fields, positive window and limit, and
+the relationship `remaining = max(0, limit - used)`. A malformed 2xx body
+throws `CailError { code: "unknown_error" }`. The read is eventually
+consistent and is not evidence that a concurrent model request has or has not
+been accounted for.
 
 ## API
 
@@ -296,9 +361,10 @@ or server connection closes.
 - `CailClient.chatCompletions(request, credential, options?): Promise<Response>`
 - `CailClient.chatFetch(credential, options?): typeof fetch`-compatible adapter
 - `CailClient.call(path, init, credential, options?): Promise<Response>`
-- `CailClient.getQuota(credential): Promise<CailQuotaSnapshot>`
-- `parseQuotaHeaders(headers): CailQuota | null`
-- `parseCailError(response): Promise<CailError>`
+- `CailClient.getCatalog(options?): Promise<Response>`
+- `CailClient.getQuota(credential, options?): Promise<CailQuotaSnapshot>`
+- `parseQuotaHeaders(headers): CailQuota | null` — legacy response compatibility
+- `parseCailError(response, signal?): Promise<CailError>`
 - `extractCailError(value): CailError | null` — dig the typed CAIL envelope
   out of an already-consumed, SDK-wrapped error object (AI SDK `RetryError` →
   `APICallError.responseBody` JSON strings, nested
@@ -307,7 +373,8 @@ or server connection closes.
 - `browserAuthRedirect(error): void`
 
 Important option types are exported as `CailClientOptions`, `CailCallOptions`,
-`CailRunOptions`, and `CailChatFetchOptions`.
+`CailRunOptions`, `CailChatFetchOptions`, `CailCatalogOptions`, and
+`CailQuotaOptions`.
 
 ## Test fixtures (`@cuny-ai-lab/cail-client/testing`)
 
@@ -323,7 +390,7 @@ import {
   quotaExceededResponse,  // + Retry-After and x-should-retry: false headers
   quotaSnapshotBody,      // valid GET /quota body
   quotaSnapshotResponse,  // 200 JSON Response for a mocked GET /quota
-  quotaHeaders,           // the six all-or-none X-CAIL-Quota-* headers
+  quotaHeaders,           // legacy all-or-none X-CAIL-Quota-* headers
 } from "@cuny-ai-lab/cail-client/testing";
 
 // Exactly what parseCailError / extractCailError consume:
@@ -345,24 +412,22 @@ framework. For canonical test *subjects* and identity-JWT minting, use
 
 ```bash
 bun install --frozen-lockfile
-bun run typecheck
-bun run build
-bun run test
-bun pm pack --dry-run
-git diff --exit-code -- dist
+bun run check
 ```
 
-CI builds and checks the package contents before testing. It fails if the
-tracked or untracked `dist/` tree differs after the build. The recording fetch
-tests assert outgoing URLs, methods, headers, credentials, signals, and bodies
-at the wire boundary.
+`bun run check` scans tracked text formatting, typechecks, runs every test,
+dry-runs the package contents, rebuilds, and rejects tracked or untracked
+`dist/` drift. `prepublishOnly` runs this same package-local gate; it does not
+depend on a sibling repository. CI installs from the frozen lockfile with the
+GitHub Packages token scoped only to that step, then runs the gate without
+registry credentials. The recording fetch tests assert outgoing URLs, methods,
+headers, credentials, signals, and bodies at the wire boundary.
 
-`test/quota-wire-vectors.json` is a byte-for-byte copy of the producer-owned
-`cail-gateway/model-proxy/test/quota-wire-vectors.json`, with its SHA-256 pinned
-in both repositories. Change the producer artifact first, then copy the whole
-file and update both hash assertions in one coordinated change. The client
-parses those raw producer bodies and rejects the retired flat envelope; it must
-not introduce a second schema.
+`test/quota-wire-vectors.json` is a consumer-owned fixture pinned by SHA-256.
+It is reviewed against the current gateway quota read-through and nested error
+contract. Its header cases cover the retained legacy parser; they do not claim
+that the current gateway emits quota headers. The client rejects the old flat
+error envelope and must not introduce a second schema.
 
 ## License
 

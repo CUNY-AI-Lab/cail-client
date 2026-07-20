@@ -7,10 +7,10 @@
  *
  * Why this exists: consumer tests kept hand-rolling the CAIL wire shapes —
  * the error envelope, the `quota_exceeded` 429, the `/quota` snapshot body,
- * the `X-CAIL-Quota-*` headers — and drifting from the contract the client
- * actually consumes (`parseCailError` / `extractCailError` / `getQuota` /
- * `parseQuotaHeaders`). These builders emit the canonical shapes (per
- * cail-gateway `docs/ERROR_CONTRACT.md` and the shared quota wire vectors) so
+ * and legacy `X-CAIL-Quota-*` headers — and drifting from the contract the
+ * client actually consumes (`parseCailError` / `extractCailError` /
+ * `getQuota` / `parseQuotaHeaders`). These builders emit the canonical shapes
+ * (per cail-gateway `docs/ERROR_CONTRACT.md` and reviewed consumer vectors) so
  * fixtures are built FROM the primitive instead of re-invented beside it.
  *
  * No test-framework imports; pure Web-standard code (`Response`, `Headers`).
@@ -75,23 +75,25 @@ export declare function quotaExceededResponse(options?: QuotaExceededEnvelopeOpt
  * `@cuny-ai-lab/cail-identity/testing`.
  */
 export declare const TEST_QUOTA_SUBJECT = "cail-0123456789abcdef0123456789abcdef";
-/** The `GET /quota` snapshot body: {@link CailQuotaSnapshot} + `object: "quota"`. */
+/** The wire body returned by the stateless Cloudflare quota read-through. */
 export type CailQuotaSnapshotBody = CailQuotaSnapshot & {
     object: "quota";
+    unit: "microdollar";
+    currency: "USD";
 };
 /**
  * Build a valid `GET /quota` snapshot body — the exact shape `getQuota`
  * accepts (`object: "quota"`, string `subject`, boolean `enforced`, safe
- * non-negative integers, `state: "ok" | "stale"`). Defaults mirror the shared
- * quota wire vectors ($10.00 limit, $0.63 used, in microdollars).
+ * non-negative integers, `state: "ok" | "stale"`, and the canonical unit and
+ * currency). Defaults represent a $10.00 limit with $0.63 used.
  */
 export declare function quotaSnapshotBody(overrides?: Partial<CailQuotaSnapshot>): CailQuotaSnapshotBody;
 /** A 200 JSON `Response` carrying {@link quotaSnapshotBody} — mock `GET /quota` with it. */
 export declare function quotaSnapshotResponse(overrides?: Partial<CailQuotaSnapshot>): Response;
 /**
- * The six advisory `X-CAIL-Quota-*` headers as a header record — the
- * all-or-none set `parseQuotaHeaders` consumes. Defaults match
- * {@link quotaSnapshotBody}.
+ * The six legacy advisory `X-CAIL-Quota-*` headers as a header record — the
+ * all-or-none set `parseQuotaHeaders` still consumes for compatibility. The
+ * current gateway does not emit these headers.
  */
 export declare function quotaHeaders(overrides?: Partial<CailQuota>): Record<string, string>;
 //# sourceMappingURL=testing.d.ts.map

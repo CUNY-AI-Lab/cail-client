@@ -140,6 +140,22 @@ describe("I1 — exactly one credential on the wire", () => {
     }
   });
 
+  it("rejects credentials with surrounding whitespace before fetch", async () => {
+    for (const credential of [
+      { kind: "key", token: "sk-cail-xyz " },
+      { kind: "jwt", token: " header.payload.signature" },
+    ] as const) {
+      const { rec, client } = wired(jsonOk({}));
+      const err = await client
+        .call("/v1/models", {}, credential)
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(CailError);
+      expect(err.code).toBe("invalid_credential");
+      expect(err.message).not.toContain(credential.token);
+      expect(rec.captured).toHaveLength(0);
+    }
+  });
+
   it("omits ambient credentials by default", async () => {
     const { rec, client } = wired(jsonOk({}));
     await client.call("/v1/models", {}, JWT);
@@ -318,6 +334,18 @@ describe("I3 — X-CAIL-Metadata validation", () => {
     expect(err.code).toBe("invalid_metadata");
     expect(rec.captured).toHaveLength(0);
   });
+
+  it("rejects non-object metadata before fetch", async () => {
+    for (const metadata of [null, [], "project=x"]) {
+      const { rec, client } = wired(jsonOk({}));
+      await expect(
+        client.call("/v1/models", {}, JWT, {
+          metadata: metadata as never,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_metadata", status: 0 });
+      expect(rec.captured).toHaveLength(0);
+    }
+  });
 });
 
 // ── Error envelope → typed error (I4) ─────────────────────────────────────
@@ -446,7 +474,7 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
         502,
         { error: "upstream_service_error", message: "outcome uncertain" },
         {
-          "x-request-id": "req-123",
+          "x-request-id": "11111111-1111-4111-8111-111111111111",
           "x-should-retry": "false",
         },
       ),
@@ -454,7 +482,7 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
     );
     const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
     expect(err.extras).toMatchObject({
-      request_id: "req-123",
+      request_id: "11111111-1111-4111-8111-111111111111",
       should_retry: false,
     });
   });
@@ -462,7 +490,7 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
   it("preserves response metadata even when the error body is malformed", async () => {
     const { client } = wired(
       nonJson(503, "busy", {
-        "x-request-id": "req-456",
+        "x-request-id": "22222222-2222-4222-8222-222222222222",
         "x-should-retry": "true",
       }),
       { maxRetries: 0 },
@@ -470,9 +498,25 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
     const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
     expect(err.code).toBe("unknown_error");
     expect(err.extras).toMatchObject({
-      request_id: "req-456",
+      request_id: "22222222-2222-4222-8222-222222222222",
       should_retry: true,
     });
+  });
+
+  it("ignores malformed or oversized response metadata", async () => {
+    const { client } = wired(
+      envelope(
+        400,
+        { error: "bad_request", message: "bad" },
+        {
+          "x-request-id": "not-a-canonical-request-id",
+          "x-should-retry": "sometimes",
+          "retry-after": "soon",
+        },
+      ),
+    );
+    const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
+    expect(err.extras).toEqual({});
   });
 
   it("V19 message is byte-identical to the envelope's message (no rewording)", async () => {
@@ -482,6 +526,26 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
     );
     const err = await client.call("/v1/models", {}, KEY).catch((e) => e);
     expect(err.message).toBe(exact);
+  });
+
+  it("bounds owned error-body parsing instead of buffering an oversized envelope", async () => {
+    const oversized = {
+      error: {
+        message: "must not be parsed",
+        type: "server_error",
+        param: null,
+        code: "oversized_provider_error",
+        cail: { padding: "x".repeat(70_000) },
+      },
+    };
+    const err = await parseCailError(
+      new Response(JSON.stringify(oversized), {
+        status: 502,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(err.code).toBe("unknown_error");
+    expect(err.message).not.toContain("must not be parsed");
   });
 });
 
@@ -742,6 +806,57 @@ describe("I5 — retry policy", () => {
     expect(err.name).toBe("AbortError");
     expect(err).not.toBeInstanceOf(CailError);
     expect(rec.captured).toHaveLength(1);
+  });
+
+  it("uses the AbortSignal reason even when fetch throws a different platform error", async () => {
+    const controller = new AbortController();
+    const reason = new DOMException("caller stopped", "AbortError");
+    const fetchImpl = (async () => {
+      controller.abort(reason);
+      throw new TypeError("platform-specific abort wrapper");
+    }) as typeof fetch;
+    const client = createCailClient({
+      baseUrl: BASE,
+      app: APP,
+      fetchImpl,
+      maxRetries: 0,
+    });
+
+    await expect(
+      client.call("/v1/models", {}, KEY, { signal: controller.signal }),
+    ).rejects.toBe(reason);
+  });
+
+  it("preserves an abort that occurs while reading a gateway error body", async () => {
+    const controller = new AbortController();
+    const reason = new DOMException("stopped during error parsing", "AbortError");
+    const fetchImpl = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(streamController) {
+          init?.signal?.addEventListener(
+            "abort",
+            () => streamController.error(new TypeError("transport wrapper")),
+            { once: true },
+          );
+        },
+      });
+      return new Response(body, { status: 400 });
+    }) as typeof fetch;
+    const client = createCailClient({
+      baseUrl: BASE,
+      app: APP,
+      fetchImpl,
+      maxRetries: 0,
+    });
+
+    const pending = client.call("/v1/models", {}, KEY, {
+      signal: controller.signal,
+    });
+    controller.abort(reason);
+    await expect(pending).rejects.toBe(reason);
   });
 
   it.each(["run", "chatCompletions"] as const)(
@@ -1031,6 +1146,67 @@ describe("I8 — canonical model run", () => {
     ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
     expect(rec.captured).toHaveLength(0);
   });
+
+  it("generic call() cannot bypass model-route ownership with query, fragment, or trailing slash", async () => {
+    for (const path of [
+      "/v1/run?mode=unsafe",
+      "/v1/run/",
+      "/v1/chat/completions#unsafe",
+      "/v1/chat/completions///?mode=unsafe",
+    ]) {
+      const { rec, client } = wired(jsonOk({}));
+      await expect(
+        client.call(path, { method: "POST" }, KEY),
+      ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
+      expect(rec.captured).toHaveLength(0);
+    }
+  });
+
+  it("authenticated call() refuses the deliberately public catalog route", async () => {
+    const { rec, client } = wired(jsonOk({}));
+    await expect(
+      client.call("/v1/catalog?modality=all", { method: "GET" }, KEY),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
+    expect(rec.captured).toHaveLength(0);
+  });
+});
+
+describe("public model catalog", () => {
+  it("GETs /v1/catalog without any credential, app, metadata, or ambient credentials", async () => {
+    const { rec, client } = wired(jsonOk({ object: "list", data: [] }));
+    const response = await client.getCatalog({ modality: "image" });
+
+    expect(response.status).toBe(200);
+    expect(rec.one.url).toBe(`${BASE}/v1/catalog?modality=image`);
+    expect(rec.one.method).toBe("GET");
+    expect(rec.one.credentials).toBe("omit");
+    expect(rec.one.headers).toEqual({ accept: "application/json" });
+  });
+
+  it("defaults to the text facet and retries a safe catalog 503", async () => {
+    const { rec, client } = wired([
+      envelope(
+        503,
+        { error: "models_unavailable", message: "catalog unavailable" },
+        { "x-should-retry": "true" },
+      ),
+      jsonOk({ object: "list", data: [] }),
+    ]);
+    const response = await client.getCatalog();
+    expect(response.status).toBe(200);
+    expect(rec.captured).toHaveLength(2);
+    expect(rec.captured[0]!.url).toBe(`${BASE}/v1/catalog`);
+    expect(rec.captured[1]!.headers["authorization"]).toBeUndefined();
+    expect(rec.captured[1]!.headers["x-cail-identity-jwt"]).toBeUndefined();
+  });
+
+  it("rejects an invalid catalog modality before fetch", async () => {
+    const { rec, client } = wired(jsonOk({}));
+    await expect(
+      client.getCatalog({ modality: "audio" as "text" }),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
+    expect(rec.captured).toHaveLength(0);
+  });
 });
 
 // ── parseCailError as a standalone export ─────────────────────────────────
@@ -1141,6 +1317,19 @@ describe("I8 — canonical chat completions", () => {
     await expect(
       client.chatCompletions({ model: "@cf/m/x", messages: [] }, KEY),
     ).rejects.toMatchObject({ code: "quota_exceeded", status: 429 });
+  });
+
+  it("rejects a chat request whose toJSON hook would replace the validated shape", async () => {
+    const { rec, client } = wired(jsonOk({}));
+    const request = {
+      model: "@cf/m/x",
+      messages: [],
+      toJSON: () => ({ model: "cail/other", messages: [] }),
+    };
+    await expect(
+      client.chatCompletions(request, KEY),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
+    expect(rec.captured).toHaveLength(0);
   });
 
   it("V30 generic call() cannot invoke /v1/chat/completions", async () => {
@@ -1696,6 +1885,28 @@ describe("construction — baseUrl trust boundary", () => {
     expect(rec.one.url).toBe("https://api.ailab.example/gateway/v1/models");
   });
 
+  it("rejects absolute, escaping, fragmented, or control-bearing call paths before fetch", async () => {
+    for (const path of [
+      "https://evil.example/v1/models",
+      "//evil.example/v1/models",
+      "/../v1/models",
+      "/v1/models#hidden",
+      "/v1/models\r\nX-Evil: 1",
+    ]) {
+      const rec = recordingFetch(jsonOk({}));
+      const client = createCailClient({
+        baseUrl: "https://api.ailab.example/gateway",
+        app: APP,
+        fetchImpl: rec.fn,
+      });
+      await expect(client.call(path, {}, JWT)).rejects.toMatchObject({
+        code: "invalid_request",
+        status: 0,
+      });
+      expect(rec.captured).toHaveLength(0);
+    }
+  });
+
   it("allows plaintext only for exact loopback hosts with explicit opt-in", async () => {
     for (const host of ["localhost", "127.0.0.1", "[::1]"]) {
       const rec = recordingFetch(jsonOk({}));
@@ -1808,6 +2019,17 @@ describe("run() idempotency key — non-secure-context fallback + caller overrid
         }),
       ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
     }
+    expect(rec.captured).toHaveLength(0);
+  });
+
+  it("rejects an input that JSON serialization would omit", async () => {
+    const { rec, client } = wired(jsonOk({}));
+    await expect(
+      client.run(
+        { model: "@cf/m/x", input: (() => "not JSON") as unknown },
+        KEY,
+      ),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
     expect(rec.captured).toHaveLength(0);
   });
 });

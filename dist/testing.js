@@ -7,10 +7,10 @@
  *
  * Why this exists: consumer tests kept hand-rolling the CAIL wire shapes —
  * the error envelope, the `quota_exceeded` 429, the `/quota` snapshot body,
- * the `X-CAIL-Quota-*` headers — and drifting from the contract the client
- * actually consumes (`parseCailError` / `extractCailError` / `getQuota` /
- * `parseQuotaHeaders`). These builders emit the canonical shapes (per
- * cail-gateway `docs/ERROR_CONTRACT.md` and the shared quota wire vectors) so
+ * and legacy `X-CAIL-Quota-*` headers — and drifting from the contract the
+ * client actually consumes (`parseCailError` / `extractCailError` /
+ * `getQuota` / `parseQuotaHeaders`). These builders emit the canonical shapes
+ * (per cail-gateway `docs/ERROR_CONTRACT.md` and reviewed consumer vectors) so
  * fixtures are built FROM the primitive instead of re-invented beside it.
  *
  * No test-framework imports; pure Web-standard code (`Response`, `Headers`).
@@ -89,13 +89,15 @@ export const TEST_QUOTA_SUBJECT = "cail-0123456789abcdef0123456789abcdef";
 /**
  * Build a valid `GET /quota` snapshot body — the exact shape `getQuota`
  * accepts (`object: "quota"`, string `subject`, boolean `enforced`, safe
- * non-negative integers, `state: "ok" | "stale"`). Defaults mirror the shared
- * quota wire vectors ($10.00 limit, $0.63 used, in microdollars).
+ * non-negative integers, `state: "ok" | "stale"`, and the canonical unit and
+ * currency). Defaults represent a $10.00 limit with $0.63 used.
  */
 export function quotaSnapshotBody(overrides = {}) {
     return {
         object: "quota",
         subject: TEST_QUOTA_SUBJECT,
+        unit: "microdollar",
+        currency: "USD",
         limit: 10_000_000,
         used: 630_000,
         remaining: 9_370_000,
@@ -115,9 +117,9 @@ export function quotaSnapshotResponse(overrides = {}) {
     });
 }
 /**
- * The six advisory `X-CAIL-Quota-*` headers as a header record — the
- * all-or-none set `parseQuotaHeaders` consumes. Defaults match
- * {@link quotaSnapshotBody}.
+ * The six legacy advisory `X-CAIL-Quota-*` headers as a header record — the
+ * all-or-none set `parseQuotaHeaders` still consumes for compatibility. The
+ * current gateway does not emit these headers.
  */
 export function quotaHeaders(overrides = {}) {
     const quota = {

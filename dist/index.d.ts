@@ -29,8 +29,8 @@
  *     `chatFetch()` adapts the chat endpoint for OpenAI-style SDKs without
  *     adding client-side retries. Gateway-declared non-retryable errors throw
  *     by default so SDK status heuristics cannot replay an ambiguous request.
- *   - Quota headers are advisory and all-or-none: absent/malformed quota
- *     headers mean "meter unavailable", never a client error (I9).
+ *   - Legacy quota headers remain parseable as an all-or-none compatibility
+ *     surface; the current gateway does not emit them (I9).
  *
  * The public surface uses Web-standard fetch, Request, Response, and
  * AbortSignal types supported by browsers, Workers, and Node >=20.
@@ -46,7 +46,11 @@ import { type CailCorrelation } from "@cuny-ai-lab/cail-log";
  */
 export { correlationFromHeaders, outboundCorrelationHeaders, TRACEPARENT_HEADER, TRACESTATE_HEADER, CAIL_REQUEST_ID_HEADER, } from "@cuny-ai-lab/cail-log";
 export type { CailCorrelation, CailCorrelationOptions, CailHeadersLike, } from "@cuny-ai-lab/cail-log";
-/** Credential forwarded on a call. Exactly one kind reaches the wire (I1). */
+/**
+ * Credential forwarded on an authenticated call. Key credentials cover
+ * personal, delegated, and app-principal keys; the gateway determines the
+ * verified subject and key policy. Exactly one kind reaches the wire (I1).
+ */
 export type CailCredential = {
     kind: "jwt";
     token: string;
@@ -56,7 +60,7 @@ export type CailCredential = {
 };
 /** Optional per-call metadata (I3). Merged with any `X-CAIL-Metadata` in `init`. */
 export type CailMetadata = Record<string, string | number>;
-/** Advisory quota meter carried on model-proxy responses (I9). */
+/** Legacy advisory quota meter retained for response compatibility (I9). */
 export interface CailQuota {
     limit: number;
     used: number;
@@ -65,8 +69,9 @@ export interface CailQuota {
     window_seconds: number;
     state: "ok" | "stale";
 }
-/** Snapshot returned by `GET /quota`. */
+/** Validated snapshot returned by the stateless `GET /quota` read-through. */
 export interface CailQuotaSnapshot extends CailQuota {
+    /** Canonical user (`cail-…`) or application (`app-…`) subject. */
     subject: string;
     enforced: boolean;
     as_of: number;
@@ -170,11 +175,24 @@ export interface CailRunOptions extends CailCallOptions {
      */
     idempotencyKey?: string;
 }
+/** Public model-catalog facet exposed by `GET /v1/catalog`. */
+export type CailCatalogModality = "text" | "image" | "all";
+export interface CailCatalogOptions {
+    /** Catalog facet. Omitted uses the gateway's default text catalog. */
+    modality?: CailCatalogModality;
+    /** Abort the catalog request. */
+    signal?: AbortSignal;
+}
+export interface CailQuotaOptions {
+    /** Abort the quota read-through. */
+    signal?: AbortSignal;
+}
 /**
  * The OpenAI-compatible chat request accepted by `POST /v1/chat/completions`.
  * Extra OpenAI parameters (`temperature`, `max_tokens`, `tools`,
  * `stream_options`, …) pass through verbatim; the gateway force-injects
- * `stream_options.include_usage` on streams for its own metering.
+ * `stream_options.include_usage` on streams for bounded diagnostics. Cloudflare
+ * AI Gateway remains the accounting and enforcement source.
  */
 export interface CailChatRequest {
     model: string;
@@ -212,24 +230,33 @@ export interface CailClient {
      * delegation. Model invocation belongs in {@link run} /
      * {@link chatCompletions}.
      *
-     * @param path   joined onto `baseUrl`.
+     * @param path   strict gateway-relative path, confined to `baseUrl`.
      * @param init   method, body, and headers for the gateway endpoint.
      * @param credential  the single credential to forward (I1).
      * @param options  optional per-call metadata (I3).
      */
     call(path: string, init: RequestInit, credential: CailCredential, options?: CailCallOptions): Promise<Response>;
     /**
-     * Read the authenticated subject's quota snapshot from `GET /quota`.
+     * Read the public model catalog from `GET /v1/catalog`. This deliberately
+     * sends no CAIL credential, app attribution, metadata, correlation, cookies,
+     * or ambient browser credentials.
+     */
+    getCatalog(options?: CailCatalogOptions): Promise<Response>;
+    /**
+     * Read the authenticated user or app subject's stateless quota snapshot from
+     * `GET /quota`. A retryable read-through failure is retried at most once.
      * Non-2xx responses throw the same {@link CailError} envelope as `call()`;
      * malformed 2xx quota bodies throw `code:"unknown_error"`.
      */
-    getQuota(credential: CailCredential): Promise<CailQuotaSnapshot>;
+    getQuota(credential: CailCredential, options?: CailQuotaOptions): Promise<CailQuotaSnapshot>;
 }
 /**
- * Parse advisory quota headers from any model-proxy response (I9). The six
+ * Parse legacy advisory quota headers from a model-proxy response (I9). The six
  * `X-CAIL-Quota-*` headers are all-or-none: if any member is absent,
  * malformed, negative, unsafe, or has an unknown state, the meter is
- * unavailable and this returns `null`. Header problems are NEVER errors.
+ * unavailable and this returns `null`. The current gateway does not emit
+ * these headers; this parser remains for semver compatibility with recorded
+ * and older responses. Header problems are NEVER errors.
  */
 export declare function parseQuotaHeaders(headers: Headers): CailQuota | null;
 /**
@@ -245,9 +272,10 @@ export declare function browserAuthRedirect(err: CailError): void;
  * never swallowed as success.
  *
  * Exported for tools that want the same parsing without the full client (e.g.
- * to classify an error from a raw `Response`).
+ * to classify an error from a raw `Response`). Pass the request's signal when
+ * available so an abort during the bounded body read preserves its reason.
  */
-export declare function parseCailError(response: Response): Promise<CailError>;
+export declare function parseCailError(response: Response, signal?: AbortSignal | null): Promise<CailError>;
 /**
  * Extract a `CailError` from an ALREADY-CONSUMED, possibly SDK-wrapped error
  * *object* — the counterpart to {@link parseCailError}, which needs the live

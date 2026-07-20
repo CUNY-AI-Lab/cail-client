@@ -29,8 +29,8 @@
  *     `chatFetch()` adapts the chat endpoint for OpenAI-style SDKs without
  *     adding client-side retries. Gateway-declared non-retryable errors throw
  *     by default so SDK status heuristics cannot replay an ambiguous request.
- *   - Quota headers are advisory and all-or-none: absent/malformed quota
- *     headers mean "meter unavailable", never a client error (I9).
+ *   - Legacy quota headers remain parseable as an all-or-none compatibility
+ *     surface; the current gateway does not emit them (I9).
  *
  * The public surface uses Web-standard fetch, Request, Response, and
  * AbortSignal types supported by browsers, Workers, and Node >=20.
@@ -65,14 +65,18 @@ export type {
   CailHeadersLike,
 } from "@cuny-ai-lab/cail-log";
 
-/** Credential forwarded on a call. Exactly one kind reaches the wire (I1). */
+/**
+ * Credential forwarded on an authenticated call. Key credentials cover
+ * personal, delegated, and app-principal keys; the gateway determines the
+ * verified subject and key policy. Exactly one kind reaches the wire (I1).
+ */
 export type CailCredential =
   { kind: "jwt"; token: string } | { kind: "key"; token: string };
 
 /** Optional per-call metadata (I3). Merged with any `X-CAIL-Metadata` in `init`. */
 export type CailMetadata = Record<string, string | number>;
 
-/** Advisory quota meter carried on model-proxy responses (I9). */
+/** Legacy advisory quota meter retained for response compatibility (I9). */
 export interface CailQuota {
   limit: number;
   used: number;
@@ -82,8 +86,9 @@ export interface CailQuota {
   state: "ok" | "stale";
 }
 
-/** Snapshot returned by `GET /quota`. */
+/** Validated snapshot returned by the stateless `GET /quota` read-through. */
 export interface CailQuotaSnapshot extends CailQuota {
+  /** Canonical user (`cail-…`) or application (`app-…`) subject. */
   subject: string;
   enforced: boolean;
   as_of: number;
@@ -212,11 +217,27 @@ export interface CailRunOptions extends CailCallOptions {
   idempotencyKey?: string;
 }
 
+/** Public model-catalog facet exposed by `GET /v1/catalog`. */
+export type CailCatalogModality = "text" | "image" | "all";
+
+export interface CailCatalogOptions {
+  /** Catalog facet. Omitted uses the gateway's default text catalog. */
+  modality?: CailCatalogModality;
+  /** Abort the catalog request. */
+  signal?: AbortSignal;
+}
+
+export interface CailQuotaOptions {
+  /** Abort the quota read-through. */
+  signal?: AbortSignal;
+}
+
 /**
  * The OpenAI-compatible chat request accepted by `POST /v1/chat/completions`.
  * Extra OpenAI parameters (`temperature`, `max_tokens`, `tools`,
  * `stream_options`, …) pass through verbatim; the gateway force-injects
- * `stream_options.include_usage` on streams for its own metering.
+ * `stream_options.include_usage` on streams for bounded diagnostics. Cloudflare
+ * AI Gateway remains the accounting and enforcement source.
  */
 export interface CailChatRequest {
   model: string;
@@ -269,7 +290,7 @@ export interface CailClient {
    * delegation. Model invocation belongs in {@link run} /
    * {@link chatCompletions}.
    *
-   * @param path   joined onto `baseUrl`.
+   * @param path   strict gateway-relative path, confined to `baseUrl`.
    * @param init   method, body, and headers for the gateway endpoint.
    * @param credential  the single credential to forward (I1).
    * @param options  optional per-call metadata (I3).
@@ -282,11 +303,22 @@ export interface CailClient {
   ): Promise<Response>;
 
   /**
-   * Read the authenticated subject's quota snapshot from `GET /quota`.
+   * Read the public model catalog from `GET /v1/catalog`. This deliberately
+   * sends no CAIL credential, app attribution, metadata, correlation, cookies,
+   * or ambient browser credentials.
+   */
+  getCatalog(options?: CailCatalogOptions): Promise<Response>;
+
+  /**
+   * Read the authenticated user or app subject's stateless quota snapshot from
+   * `GET /quota`. A retryable read-through failure is retried at most once.
    * Non-2xx responses throw the same {@link CailError} envelope as `call()`;
    * malformed 2xx quota bodies throw `code:"unknown_error"`.
    */
-  getQuota(credential: CailCredential): Promise<CailQuotaSnapshot>;
+  getQuota(
+    credential: CailCredential,
+    options?: CailQuotaOptions,
+  ): Promise<CailQuotaSnapshot>;
 }
 
 const APP_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -301,8 +333,13 @@ const MAX_METADATA_STRING_LEN = 128;
 const CREDENTIAL_CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/;
 const UUID_V4_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CAIL_SUBJECT_RE = /^cail-[0-9a-f]{32}$/;
+const APP_SUBJECT_RE = /^app-[0-9a-f]{32}$/;
 const QUOTA_STATE_VALUES = new Set(["ok", "stale"]);
 const QUOTA_INTEGER_RE = /^\d+$/;
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+const MAX_EXTRACT_JSON_CHARS = 256 * 1024;
+const MAX_RESPONSE_METADATA_CHARS = 128;
 
 function parseQuotaInteger(value: string | null): number | null {
   if (value === null || !QUOTA_INTEGER_RE.test(value)) return null;
@@ -316,10 +353,12 @@ function isQuotaState(value: unknown): value is CailQuota["state"] {
 }
 
 /**
- * Parse advisory quota headers from any model-proxy response (I9). The six
+ * Parse legacy advisory quota headers from a model-proxy response (I9). The six
  * `X-CAIL-Quota-*` headers are all-or-none: if any member is absent,
  * malformed, negative, unsafe, or has an unknown state, the meter is
- * unavailable and this returns `null`. Header problems are NEVER errors.
+ * unavailable and this returns `null`. The current gateway does not emit
+ * these headers; this parser remains for semver compatibility with recorded
+ * and older responses. Header problems are NEVER errors.
  */
 export function parseQuotaHeaders(headers: Headers): CailQuota | null {
   const limit = parseQuotaInteger(headers.get("X-CAIL-Quota-Limit"));
@@ -449,29 +488,18 @@ function deleteHeaderCI(record: Record<string, string>, name: string): void {
  * can then apply credential + CAIL headers deterministically.
  */
 function toHeaderRecord(init: HeadersInit | undefined): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (!init) return out;
-  if (typeof Headers !== "undefined" && init instanceof Headers) {
-    init.forEach((value, key) => {
+  const out = Object.create(null) as Record<string, string>;
+  try {
+    const headers = new Headers(init);
+    headers.forEach((value, key) => {
       out[key] = value;
     });
-  } else if (Array.isArray(init)) {
-    for (const [key, value] of init) {
-      let existingKey: string | undefined;
-      for (const k of Object.keys(out)) {
-        if (k.toLowerCase() === key.toLowerCase()) {
-          existingKey = k;
-          break;
-        }
-      }
-      if (existingKey !== undefined) {
-        out[existingKey] = `${out[existingKey]}, ${value}`;
-      } else {
-        out[key] = value;
-      }
-    }
-  } else {
-    for (const [key, value] of Object.entries(init)) out[key] = value;
+  } catch {
+    throw new CailError(
+      "invalid_request",
+      "Request headers must be valid Web Headers.",
+      0,
+    );
   }
   return out;
 }
@@ -613,7 +641,7 @@ function addResponseMetadataExtras(
   response: Response,
   extras: Record<string, unknown>,
 ): void {
-  const requestId = response.headers.get("x-request-id");
+  const requestId = validRequestId(response.headers.get("x-request-id"));
   if (requestId !== null && !("request_id" in extras)) {
     extras["request_id"] = requestId;
   }
@@ -621,9 +649,102 @@ function addResponseMetadataExtras(
   if (shouldRetry !== null && !("should_retry" in extras)) {
     extras["should_retry"] = shouldRetry;
   }
-  const retryAfter = response.headers.get("Retry-After");
+  const retryAfter = validRetryAfter(response.headers.get("Retry-After"));
   if (retryAfter !== null && !("retry_after" in extras)) {
     extras["retry_after"] = retryAfter;
+  }
+}
+
+function validRequestId(value: string | null): string | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  return trimmed.length <= MAX_RESPONSE_METADATA_CHARS &&
+    UUID_V4_RE.test(trimmed)
+    ? trimmed.toLowerCase()
+    : null;
+}
+
+function validRetryAfter(value: string | null): string | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  if (
+    trimmed.length === 0 ||
+    trimmed.length > MAX_RESPONSE_METADATA_CHARS ||
+    CREDENTIAL_CONTROL_CHAR_RE.test(trimmed)
+  ) {
+    return null;
+  }
+  if (/^\d+$/.test(trimmed)) {
+    const seconds = Number(trimmed);
+    return Number.isSafeInteger(seconds) ? trimmed : null;
+  }
+  return Number.isNaN(Date.parse(trimmed)) ? null : trimmed;
+}
+
+async function responseTextWithinLimit(
+  response: Response,
+  maxBytes = MAX_ERROR_BODY_BYTES,
+  signal?: AbortSignal | null,
+): Promise<string | null> {
+  if (signal?.aborted) throw abortReason(signal);
+  const contentLength = response.headers.get("content-length");
+  if (
+    contentLength !== null &&
+    /^\d+$/.test(contentLength) &&
+    Number(contentLength) > maxBytes
+  ) {
+    void response.body?.cancel().catch(() => {});
+    return null;
+  }
+
+  if (response.body === null) {
+    try {
+      const text = await response.text();
+      return new TextEncoder().encode(text).byteLength <= maxBytes ? text : null;
+    } catch (err) {
+      if (signal?.aborted) throw abortReason(signal);
+      if (
+        err &&
+        typeof err === "object" &&
+        (err as { name?: unknown }).name === "AbortError"
+      ) {
+        throw err;
+      }
+      return "";
+    }
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = "";
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        if (signal?.aborted) throw abortReason(signal);
+        text += decoder.decode();
+        return text;
+      }
+      total += chunk.value.byteLength;
+      if (total > maxBytes) {
+        void reader.cancel().catch(() => {});
+        return null;
+      }
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+  } catch (err) {
+    if (signal?.aborted) throw abortReason(signal);
+    if (
+      err &&
+      typeof err === "object" &&
+      (err as { name?: unknown }).name === "AbortError"
+    ) {
+      throw err;
+    }
+    return "";
+  } finally {
+    reader.releaseLock();
   }
 }
 
@@ -634,29 +755,27 @@ function addResponseMetadataExtras(
  * never swallowed as success.
  *
  * Exported for tools that want the same parsing without the full client (e.g.
- * to classify an error from a raw `Response`).
+ * to classify an error from a raw `Response`). Pass the request's signal when
+ * available so an abort during the bounded body read preserves its reason.
  */
-export async function parseCailError(response: Response): Promise<CailError> {
+export async function parseCailError(
+  response: Response,
+  signal?: AbortSignal | null,
+): Promise<CailError> {
   const status = response.status;
-  let bodyText: string;
-  try {
-    bodyText = await response.text();
-  } catch (err) {
-    if (
-      err &&
-      typeof err === "object" &&
-      (err as { name?: unknown }).name === "AbortError"
-    ) {
-      throw err;
-    }
-    bodyText = "";
-  }
+  const bodyText = await responseTextWithinLimit(
+    response,
+    MAX_ERROR_BODY_BYTES,
+    signal,
+  );
 
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(bodyText);
-  } catch {
-    parsed = undefined;
+  if (bodyText !== null) {
+    try {
+      parsed = JSON.parse(bodyText);
+    } catch {
+      parsed = undefined;
+    }
   }
 
   if (isRecord(parsed) && isRecord(parsed["error"])) {
@@ -701,6 +820,7 @@ export async function parseCailError(response: Response): Promise<CailError> {
 /** Try to parse a string as JSON; non-strings and unparseable strings pass through. */
 function parseJsonLayer(value: unknown): unknown {
   if (typeof value !== "string") return value;
+  if (value.length > MAX_EXTRACT_JSON_CHARS) return value;
   try {
     return JSON.parse(value);
   } catch {
@@ -807,6 +927,66 @@ function cailErrorFromBareShape(
 /** Safety cap on layers visited by {@link extractCailError} (adversarial inputs). */
 const EXTRACT_MAX_LAYERS = 256;
 
+type ExtractedResponseMetadata = {
+  request_id?: string;
+  should_retry?: boolean;
+  retry_after?: string;
+};
+
+function responseMetadataFromWrapper(
+  record: Record<string, unknown>,
+): ExtractedResponseMetadata {
+  const raw = record["responseHeaders"];
+  if (
+    !(
+      (typeof Headers !== "undefined" && raw instanceof Headers) ||
+      isRecord(raw)
+    )
+  ) {
+    return {};
+  }
+
+  let headers: Headers;
+  try {
+    headers = raw instanceof Headers ? raw : new Headers(
+      Object.fromEntries(
+        Object.entries(raw).filter((entry): entry is [string, string] =>
+          typeof entry[1] === "string"
+        ),
+      ),
+    );
+  } catch {
+    return {};
+  }
+
+  const metadata: ExtractedResponseMetadata = {};
+  const requestId = validRequestId(headers.get("x-request-id"));
+  if (requestId !== null) metadata.request_id = requestId;
+  const retry = headers.get("x-should-retry")?.trim().toLowerCase();
+  if (retry === "true") metadata.should_retry = true;
+  if (retry === "false") metadata.should_retry = false;
+  const retryAfter = validRetryAfter(headers.get("retry-after"));
+  if (retryAfter !== null) metadata.retry_after = retryAfter;
+  return metadata;
+}
+
+function mergeResponseMetadata(
+  outer: ExtractedResponseMetadata,
+  inner: ExtractedResponseMetadata,
+): ExtractedResponseMetadata {
+  return { ...outer, ...inner };
+}
+
+function attachResponseMetadata(
+  error: CailError,
+  metadata: ExtractedResponseMetadata,
+): CailError {
+  for (const [key, value] of Object.entries(metadata)) {
+    if (!(key in error.extras)) error.extras[key] = value;
+  }
+  return error;
+}
+
 /**
  * Extract a `CailError` from an ALREADY-CONSUMED, possibly SDK-wrapped error
  * *object* — the counterpart to {@link parseCailError}, which needs the live
@@ -836,8 +1016,12 @@ const EXTRACT_MAX_LAYERS = 256;
  * Dependency-free, synchronous, cycle-safe.
  */
 export function extractCailError(value: unknown): CailError | null {
-  const layers: Array<{ value: unknown; status: number }> = [
-    { value, status: 0 },
+  const layers: Array<{
+    value: unknown;
+    status: number;
+    metadata: ExtractedResponseMetadata;
+  }> = [
+    { value, status: 0, metadata: {} },
   ];
   const seen = new Set<object>();
   let visited = 0;
@@ -851,17 +1035,27 @@ export function extractCailError(value: unknown): CailError | null {
     seen.add(layer);
     visited++;
 
-    if (layer instanceof CailError) return layer;
+    if (layer instanceof CailError) {
+      return attachResponseMetadata(layer, entry.metadata);
+    }
 
     const record = layer as Record<string, unknown>;
     const status = wrapperStatus(record) ?? entry.status;
+    const metadata = mergeResponseMetadata(
+      entry.metadata,
+      responseMetadataFromWrapper(record),
+    );
 
     if (isRecord(record["error"])) {
       const fromEnvelope = cailErrorFromEnvelope(record["error"], status);
-      if (fromEnvelope !== null) return fromEnvelope;
+      if (fromEnvelope !== null) {
+        return attachResponseMetadata(fromEnvelope, metadata);
+      }
     }
     const fromBareShape = cailErrorFromBareShape(record, status);
-    if (fromBareShape !== null) return fromBareShape;
+    if (fromBareShape !== null) {
+      return attachResponseMetadata(fromBareShape, metadata);
+    }
 
     for (const nested of [
       record["responseBody"],
@@ -870,11 +1064,13 @@ export function extractCailError(value: unknown): CailError | null {
       record["data"],
       record["lastError"],
     ]) {
-      if (nested !== undefined) layers.push({ value: nested, status });
+      if (nested !== undefined) {
+        layers.push({ value: nested, status, metadata });
+      }
     }
     if (Array.isArray(record["errors"])) {
       for (const nested of record["errors"]) {
-        layers.push({ value: nested, status });
+        layers.push({ value: nested, status, metadata });
       }
     }
   }
@@ -920,7 +1116,11 @@ function parseQuotaSnapshotBody(
 
   if (
     obj["object"] !== "quota" ||
-    typeof obj["subject"] !== "string" ||
+    (typeof obj["subject"] !== "string" ||
+      (!CAIL_SUBJECT_RE.test(obj["subject"]) &&
+        !APP_SUBJECT_RE.test(obj["subject"]))) ||
+    obj["unit"] !== "microdollar" ||
+    obj["currency"] !== "USD" ||
     typeof obj["enforced"] !== "boolean" ||
     limit === null ||
     used === null ||
@@ -928,7 +1128,10 @@ function parseQuotaSnapshotBody(
     reset === null ||
     windowSeconds === null ||
     asOf === null ||
-    !isQuotaState(state)
+    !isQuotaState(state) ||
+    limit === 0 ||
+    windowSeconds === 0 ||
+    remaining !== Math.max(0, limit - used)
   ) {
     throw quotaBodyUnknownError(status);
   }
@@ -1037,9 +1240,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
   if (typeof opts.app !== "string" || !APP_SLUG_RE.test(opts.app)) {
     throw new CailError(
       "invalid_config",
-      `Invalid X-CAIL-App slug ${JSON.stringify(
-        opts.app,
-      )}: must match /^[a-z0-9][a-z0-9-]{0,63}$/ (low-cardinality, per-tool).`,
+      "Invalid X-CAIL-App slug: it must match /^[a-z0-9][a-z0-9-]{0,63}$/ (low-cardinality, per-tool).",
       0,
     );
   }
@@ -1047,6 +1248,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
   const app = opts.app;
   const normalizedPath = parsedBaseUrl.pathname.replace(/\/+$/, "");
   const baseUrl = `${parsedBaseUrl.origin}${normalizedPath}`;
+  const callPathPrefix = normalizedPath;
   const allowAmbientCredentials = opts.allowAmbientCredentials === true;
   const fetchImpl = opts.fetchImpl ?? (globalThis.fetch as typeof fetch);
   if (typeof fetchImpl !== "function") {
@@ -1079,20 +1281,105 @@ export function createCailClient(opts: CailClientOptions): CailClient {
   const onAuthRequired =
     opts.onAuthRequired ?? (inBrowser() ? browserAuthRedirect : undefined);
 
+  function resolveCallTarget(path: string): {
+    url: string;
+    routePath: string;
+  } {
+    if (
+      typeof path !== "string" ||
+      path.length === 0 ||
+      path.trim() !== path ||
+      /\s/.test(path) ||
+      CREDENTIAL_CONTROL_CHAR_RE.test(path) ||
+      path.includes("\\") ||
+      path.includes("#") ||
+      path.startsWith("//") ||
+      /^[a-z][a-z0-9+.-]*:/i.test(path)
+    ) {
+      throw new CailError(
+        "invalid_request",
+        "call() requires a gateway-relative path without whitespace, a fragment, or an absolute URL.",
+        0,
+      );
+    }
+
+    let target: URL;
+    try {
+      target = new URL(
+        `${baseUrl}${path.startsWith("/") ? "" : "/"}${path}`,
+      );
+    } catch {
+      throw new CailError(
+        "invalid_request",
+        "call() requires a valid gateway-relative path.",
+        0,
+      );
+    }
+    if (
+      target.origin !== parsedBaseUrl.origin ||
+      (callPathPrefix !== "" &&
+        target.pathname !== callPathPrefix &&
+        !target.pathname.startsWith(`${callPathPrefix}/`))
+    ) {
+      throw new CailError(
+        "invalid_request",
+        "call() path must remain inside the configured gateway base path.",
+        0,
+      );
+    }
+
+    const relativePath =
+      callPathPrefix === ""
+        ? target.pathname
+        : target.pathname.slice(callPathPrefix.length) || "/";
+    return {
+      url: target.href,
+      routePath: relativePath.replace(/\/+$/, "") || "/",
+    };
+  }
+
   async function call(
     path: string,
     init: RequestInit,
-    credential: CailCredential,
+    credential: CailCredential | undefined,
     options?: CailCallOptions,
     internal?: {
       retry5xx?: boolean;
       modelRun?: boolean;
       idempotentModelRun?: boolean;
       rawMode?: "throw" | "return";
+      maxRetries?: number;
+      publicCatalog?: boolean;
     },
   ): Promise<Response> {
     if (
-      (path === "/v1/run" || path === "/v1/chat/completions") &&
+      typeof init !== "object" ||
+      init === null ||
+      Array.isArray(init)
+    ) {
+      throw new CailError(
+        "invalid_request",
+        "call() requires a RequestInit object.",
+        0,
+      );
+    }
+    if (
+      options !== undefined &&
+      (typeof options !== "object" ||
+        options === null ||
+        Array.isArray(options))
+    ) {
+      throw new CailError(
+        "invalid_request",
+        "call() options must be an object when present.",
+        0,
+      );
+    }
+
+    const target = resolveCallTarget(path);
+    if (
+      (target.routePath === "/v1/run" ||
+        target.routePath === "/v1/chat/completions") &&
       internal?.modelRun !== true
     ) {
       throw new CailError(
@@ -1101,39 +1388,60 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         0,
       );
     }
+    const publicCatalog = internal?.publicCatalog === true;
+    if (
+      target.routePath === "/v1/catalog" &&
+      publicCatalog !== true
+    ) {
+      throw new CailError(
+        "invalid_request",
+        "Use getCatalog() for the public model catalog.",
+        0,
+      );
+    }
+    if (publicCatalog && target.routePath !== "/v1/catalog") {
+      throw new CailError(
+        "invalid_request",
+        "The public transport is restricted to GET /v1/catalog.",
+        0,
+      );
+    }
 
-    if (
-      typeof credential !== "object" ||
-      credential === null ||
-      (credential.kind !== "jwt" && credential.kind !== "key") ||
-      typeof credential.token !== "string"
-    ) {
-      throw new CailError(
-        "invalid_credential",
-        'call() requires a credential { kind: "jwt" | "key", token: string }.',
-        0,
-      );
-    }
-    if (
-      credential.token.length === 0 ||
-      CREDENTIAL_CONTROL_CHAR_RE.test(credential.token)
-    ) {
-      throw new CailError(
-        "invalid_credential",
-        "Credential token must be non-empty and contain no control characters.",
-        0,
-      );
-    }
-    if (
-      credential.kind === "key" &&
-      (!credential.token.startsWith("sk-cail-") ||
-        credential.token.length === "sk-cail-".length)
-    ) {
-      throw new CailError(
-        "invalid_credential",
-        "Key credential must be a non-empty CAIL-issued key.",
-        0,
-      );
+    if (!publicCatalog) {
+      if (
+        typeof credential !== "object" ||
+        credential === null ||
+        (credential.kind !== "jwt" && credential.kind !== "key") ||
+        typeof credential.token !== "string"
+      ) {
+        throw new CailError(
+          "invalid_credential",
+          'call() requires a credential { kind: "jwt" | "key", token: string }.',
+          0,
+        );
+      }
+      if (
+        credential.token.length === 0 ||
+        credential.token.trim() !== credential.token ||
+        CREDENTIAL_CONTROL_CHAR_RE.test(credential.token)
+      ) {
+        throw new CailError(
+          "invalid_credential",
+          "Credential token must be non-empty, contain no surrounding whitespace, and contain no control characters.",
+          0,
+        );
+      }
+      if (
+        credential.kind === "key" &&
+        (!credential.token.startsWith("sk-cail-") ||
+          credential.token.length === "sk-cail-".length)
+      ) {
+        throw new CailError(
+          "invalid_credential",
+          "Key credential must be a non-empty CAIL-issued key.",
+          0,
+        );
+      }
     }
     if (
       options?.retryNonIdempotent !== undefined &&
@@ -1147,7 +1455,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     }
 
     const headers = toHeaderRecord(init.headers);
-    if (!allowAmbientCredentials) {
+    if (!publicCatalog && !allowAmbientCredentials) {
       const hasCookie = Object.keys(headers).some(
         (key) => key.toLowerCase() === "cookie",
       );
@@ -1163,30 +1471,49 @@ export function createCailClient(opts: CailClientOptions): CailClient {
       }
     }
 
-    // I1 — exactly one credential on the wire.
-    if (credential.kind === "jwt") {
+    // I1 — exactly one credential on authenticated calls. The public catalog
+    // sends none and strips all client-owned/private headers defensively.
+    if (publicCatalog) {
+      for (const name of [
+        "Authorization",
+        "X-CAIL-Identity-JWT",
+        "X-CAIL-App",
+        "X-CAIL-Metadata",
+        TRACEPARENT_HEADER,
+        TRACESTATE_HEADER,
+        CAIL_REQUEST_ID_HEADER,
+        "Cookie",
+      ]) {
+        deleteHeaderCI(headers, name);
+      }
+    } else if (credential!.kind === "jwt") {
       // Strip ANY Authorization the caller/SDK injected (the dummy-bearer
       // footgun): the proxy is JWT-first-strict, so a stray bearer must not
       // reach the wire.
       deleteHeaderCI(headers, "Authorization");
       deleteHeaderCI(headers, "X-CAIL-Identity-JWT");
-      headers["X-CAIL-Identity-JWT"] = credential.token;
+      headers["X-CAIL-Identity-JWT"] = credential!.token;
     } else {
       // key path — bearer only, never the JWT header.
       deleteHeaderCI(headers, "Authorization");
       deleteHeaderCI(headers, "X-CAIL-Identity-JWT");
-      headers["Authorization"] = `Bearer ${credential.token}`;
+      headers["Authorization"] = `Bearer ${credential!.token}`;
     }
 
     // I2 — X-CAIL-App is always the constructed slug (caller cannot override it).
     deleteHeaderCI(headers, "X-CAIL-App");
-    headers["X-CAIL-App"] = app;
+    if (!publicCatalog) headers["X-CAIL-App"] = app;
 
     // I3 — X-CAIL-Metadata: merge per-call `options.metadata` over any header
     // already present, validate, serialize.
-    const headerMeta = existingMetadataHeader(headers);
+    const headerMeta = publicCatalog
+      ? undefined
+      : existingMetadataHeader(headers);
     let merged: CailMetadata | undefined;
-    if (headerMeta !== undefined || options?.metadata !== undefined) {
+    if (
+      !publicCatalog &&
+      (headerMeta !== undefined || options?.metadata !== undefined)
+    ) {
       merged = Object.create(null) as CailMetadata;
       if (headerMeta !== undefined) {
         let base: unknown;
@@ -1209,6 +1536,13 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         Object.assign(merged, base as Record<string, unknown>);
       }
       if (options?.metadata !== undefined) {
+        if (!isRecord(options.metadata)) {
+          throw new CailError(
+            "invalid_metadata",
+            "X-CAIL-Metadata must be an object.",
+            0,
+          );
+        }
         Object.assign(merged, options.metadata);
       }
     }
@@ -1223,7 +1557,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     // trace. Applied once, before any transport attempt — retries of the same
     // logical request deliberately carry the same correlation. Absent → no
     // headers added, no behavior change.
-    if (options?.correlation !== undefined) {
+    if (!publicCatalog && options?.correlation !== undefined) {
       let correlationHeaders: Record<string, string>;
       try {
         correlationHeaders = outboundCorrelationHeaders(options.correlation);
@@ -1233,9 +1567,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         // client's error vocabulary, client-side (status 0), nothing on the wire.
         throw new CailError(
           "invalid_correlation",
-          err instanceof Error && err.message
-            ? err.message
-            : "Invalid correlation: expected { trace_id, span_id, trace_flags, request_id } from correlationFromHeaders().",
+          "Invalid correlation: expected a value produced by correlationFromHeaders().",
           0,
         );
       }
@@ -1245,7 +1577,6 @@ export function createCailClient(opts: CailClientOptions): CailClient {
       Object.assign(headers, correlationHeaders);
     }
 
-    const url = `${baseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
     // I8 — body + model forwarded verbatim: we never touch init.body.
     const signal = options?.signal ?? init.signal;
     if (
@@ -1263,12 +1594,20 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     }
     const hasNonReplayableBody = isReadableStreamBody(init.body);
     const retry5xx = internal?.retry5xx !== false;
+    const retryLimit = internal?.maxRetries ?? maxRetries;
 
     // Retry safety for the generic path: a non-idempotent endpoint requires
     // BOTH a non-empty Idempotency-Key and an explicit assertion that the
     // endpoint implements durable claim/replay. A key cannot create server-side
     // semantics. run() supplies its stronger internal gateway contract.
     const method = (init.method ?? "GET").toUpperCase();
+    if (publicCatalog && method !== "GET") {
+      throw new CailError(
+        "invalid_request",
+        "The public model catalog requires method GET.",
+        0,
+      );
+    }
     let wireIdempotencyKey: string | undefined;
     for (const key of Object.keys(headers)) {
       if (
@@ -1301,7 +1640,10 @@ export function createCailClient(opts: CailClientOptions): CailClient {
       headers,
       redirect: "manual",
       signal,
-      credentials: allowAmbientCredentials ? init.credentials : "omit",
+      credentials:
+        publicCatalog || !allowAmbientCredentials
+          ? "omit"
+          : init.credentials,
     };
 
     let attempt = 0;
@@ -1309,9 +1651,9 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     for (;;) {
       let response: Response;
       try {
-        response = await fetchImpl(url, requestInit);
+        response = await fetchImpl(target.url, requestInit);
       } catch (err) {
-        if (signal?.aborted) throw err;
+        if (signal?.aborted) throw abortReason(signal);
         // chatFetch never retries. Its default mode wraps an ambiguous network
         // failure in CailError so status-based SDK retry logic cannot replay it.
         // Explicit return mode leaves the platform error to an SDK whose retry
@@ -1331,7 +1673,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
           retrySafeMethod &&
           !hasNonReplayableBody &&
           isRetriableNetworkError(err) &&
-          attempt < maxRetries
+          attempt < retryLimit
         ) {
           await sleep(backoffDelayMs(attempt), signal);
           attempt++;
@@ -1378,8 +1720,9 @@ export function createCailClient(opts: CailClientOptions): CailClient {
           shouldRetry === false
         ) {
           try {
-            peek = await parseCailError(response.clone());
+            peek = await parseCailError(response.clone(), signal);
           } catch {
+            if (signal?.aborted) throw abortReason(signal);
             // A malformed body is parsed from the original only if we must throw.
           }
         }
@@ -1403,7 +1746,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
           throw peek;
         }
         if (shouldRetry === false && internal.rawMode === "throw") {
-          throw peek ?? (await parseCailError(response));
+          throw peek ?? (await parseCailError(response, signal));
         }
         return response;
       }
@@ -1416,12 +1759,13 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         shouldRetryHeader(response) !== false &&
         internal?.idempotentModelRun === true &&
         !hasNonReplayableBody &&
-        attempt < maxRetries
+        attempt < retryLimit
       ) {
         let conflict: CailError | null = null;
         try {
-          conflict = await parseCailError(response.clone());
+          conflict = await parseCailError(response.clone(), signal);
         } catch {
+          if (signal?.aborted) throw abortReason(signal);
           // An unreadable conflict is handled as an ordinary non-2xx below.
         }
         if (conflict?.code === "idempotency_in_progress") {
@@ -1446,7 +1790,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         retrySafeMethod &&
         retry5xx &&
         !hasNonReplayableBody &&
-        attempt < maxRetries
+        attempt < retryLimit
       ) {
         // Drain the failed response body so the connection can be reused.
         try {
@@ -1460,7 +1804,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
       }
 
       // I4 — non-2xx (and non-retriable, or retries exhausted) → typed error.
-      const error = await parseCailError(response);
+      const error = await parseCailError(response, signal);
 
       // I6 — 401 authentication_required hook, then still throw.
       if (
@@ -1481,21 +1825,87 @@ export function createCailClient(opts: CailClientOptions): CailClient {
 
   async function getQuota(
     credential: CailCredential,
+    options?: CailQuotaOptions,
   ): Promise<CailQuotaSnapshot> {
+    if (
+      options !== undefined &&
+      (typeof options !== "object" ||
+        options === null ||
+        Array.isArray(options))
+    ) {
+      throw new CailError(
+        "invalid_request",
+        "getQuota() options must be an object when present.",
+        0,
+      );
+    }
     const response = await call(
       "/quota",
       { method: "GET" },
       credential,
-      undefined,
-      { retry5xx: false },
+      options?.signal === undefined ? undefined : { signal: options.signal },
+      { maxRetries: Math.min(maxRetries, 1) },
     );
+    let bodyText: string | null;
+    try {
+      bodyText = await responseTextWithinLimit(
+        response,
+        MAX_ERROR_BODY_BYTES,
+        options?.signal,
+      );
+    } catch {
+      if (options?.signal?.aborted) throw abortReason(options.signal);
+      throw quotaBodyUnknownError(response.status);
+    }
+    if (bodyText === null) throw quotaBodyUnknownError(response.status);
     let body: unknown;
     try {
-      body = await response.json();
+      body = JSON.parse(bodyText);
     } catch {
       throw quotaBodyUnknownError(response.status);
     }
     return parseQuotaSnapshotBody(body, response.status);
+  }
+
+  async function getCatalog(
+    options?: CailCatalogOptions,
+  ): Promise<Response> {
+    if (
+      options !== undefined &&
+      (typeof options !== "object" ||
+        options === null ||
+        Array.isArray(options))
+    ) {
+      throw new CailError(
+        "invalid_request",
+        "getCatalog() options must be an object when present.",
+        0,
+      );
+    }
+    const modality = options?.modality;
+    if (
+      modality !== undefined &&
+      modality !== "text" &&
+      modality !== "image" &&
+      modality !== "all"
+    ) {
+      throw new CailError(
+        "invalid_request",
+        'getCatalog() modality must be "text", "image", or "all".',
+        0,
+      );
+    }
+    const path =
+      modality === undefined
+        ? "/v1/catalog"
+        : `/v1/catalog?modality=${modality}`;
+    return call(
+      path,
+      { method: "GET", headers: { accept: "application/json" } },
+      undefined,
+      options?.signal === undefined ? undefined : { signal: options.signal },
+      { publicCatalog: true },
+    );
   }
 
   async function run(
@@ -1503,6 +1913,18 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     credential: CailCredential,
     options?: CailRunOptions,
   ): Promise<Response> {
+    if (
+      options !== undefined &&
+      (typeof options !== "object" ||
+        options === null ||
+        Array.isArray(options))
+    ) {
+      throw new CailError(
+        "invalid_request",
+        "run() options must be an object when present.",
+        0,
+      );
+    }
     if (
       typeof request !== "object" ||
       request === null ||
@@ -1530,13 +1952,28 @@ export function createCailClient(opts: CailClientOptions): CailClient {
       );
     }
 
-    let body: string;
+    let body: string | undefined;
     try {
       body = JSON.stringify({ model: request.model, input: request.input });
     } catch {
       throw new CailError(
         "invalid_request",
         "run() input must be JSON-serializable.",
+        0,
+      );
+    }
+    if (body === undefined) {
+      throw new CailError(
+        "invalid_request",
+        "run() input must be JSON-serializable.",
+        0,
+      );
+    }
+    const serialized = JSON.parse(body) as Record<string, unknown>;
+    if (!Object.prototype.hasOwnProperty.call(serialized, "input")) {
+      throw new CailError(
+        "invalid_request",
+        "run() input must serialize to a JSON value.",
         0,
       );
     }
@@ -1563,6 +2000,18 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     options?: CailCallOptions,
   ): Promise<Response> {
     if (
+      options !== undefined &&
+      (typeof options !== "object" ||
+        options === null ||
+        Array.isArray(options))
+    ) {
+      throw new CailError(
+        "invalid_request",
+        "chatCompletions() options must be an object when present.",
+        0,
+      );
+    }
+    if (
       typeof request !== "object" ||
       request === null ||
       typeof request.model !== "string" ||
@@ -1576,11 +2025,25 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         0,
       );
     }
+    if (typeof request["toJSON"] === "function") {
+      throw new CailError(
+        "invalid_request",
+        "chatCompletions() does not accept a toJSON hook that can replace the validated request.",
+        0,
+      );
+    }
 
-    let body: string;
+    let body: string | undefined;
     try {
       body = JSON.stringify(request);
     } catch {
+      throw new CailError(
+        "invalid_request",
+        "chatCompletions() request must be JSON-serializable.",
+        0,
+      );
+    }
+    if (body === undefined) {
       throw new CailError(
         "invalid_request",
         "chatCompletions() request must be JSON-serializable.",
@@ -1605,6 +2068,18 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     credential: CailCredential,
     options?: CailChatFetchOptions,
   ): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
+    if (
+      options !== undefined &&
+      (typeof options !== "object" ||
+        options === null ||
+        Array.isArray(options))
+    ) {
+      throw new CailError(
+        "invalid_request",
+        "chatFetch() options must be an object when present.",
+        0,
+      );
+    }
     const rawMode = options?.nonRetryableErrorMode ?? "throw";
     if (rawMode !== "throw" && rawMode !== "return") {
       throw new CailError(
@@ -1702,5 +2177,12 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     };
   }
 
-  return { run, chatCompletions, chatFetch, call, getQuota };
+  return {
+    run,
+    chatCompletions,
+    chatFetch,
+    call: call as CailClient["call"],
+    getCatalog,
+    getQuota,
+  };
 }
