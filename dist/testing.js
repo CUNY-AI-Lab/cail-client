@@ -6,10 +6,9 @@
  * imports it, so bundles that don't import it pay nothing for it.
  *
  * Why this exists: consumer tests kept hand-rolling the CAIL wire shapes —
- * the error envelope, the `quota_exceeded` 429, the `/quota` snapshot body,
- * and legacy `X-CAIL-Quota-*` headers — and drifting from the contract the
- * client actually consumes (`parseCailError` / `extractCailError` /
- * `getQuota` / `parseQuotaHeaders`). These builders emit the canonical shapes
+ * the error envelope, the `quota_exceeded` 429, and the `/quota` snapshot body
+ * — and drifting from the contract the client actually consumes
+ * (`parseCailError` / `extractCailError` / `getQuota`). These builders emit the canonical shapes
  * (per cail-gateway `docs/ERROR_CONTRACT.md` and reviewed consumer vectors) so
  * fixtures are built FROM the primitive instead of re-invented beside it.
  *
@@ -78,7 +77,7 @@ export function quotaExceededResponse(options = {}) {
     });
 }
 // ---------------------------------------------------------------------------
-// The /quota snapshot and X-CAIL-Quota-* headers
+// The /quota snapshot
 // ---------------------------------------------------------------------------
 /**
  * A canonical-shaped (`cail-` + 32 lowercase hex) test subject for quota
@@ -115,28 +114,4 @@ export function quotaSnapshotResponse(overrides = {}) {
         status: 200,
         headers: { "content-type": "application/json" },
     });
-}
-/**
- * The six legacy advisory `X-CAIL-Quota-*` headers as a header record — the
- * all-or-none set `parseQuotaHeaders` still consumes for compatibility. The
- * current gateway does not emit these headers.
- */
-export function quotaHeaders(overrides = {}) {
-    const quota = {
-        limit: 10_000_000,
-        used: 630_000,
-        remaining: 9_370_000,
-        reset: 1_723_200_000,
-        window_seconds: 2_592_000,
-        state: "ok",
-        ...overrides,
-    };
-    return {
-        "X-CAIL-Quota-Limit": String(quota.limit),
-        "X-CAIL-Quota-Used": String(quota.used),
-        "X-CAIL-Quota-Remaining": String(quota.remaining),
-        "X-CAIL-Quota-Reset": String(quota.reset),
-        "X-CAIL-Quota-Window": String(quota.window_seconds),
-        "X-CAIL-Quota-State": quota.state,
-    };
 }

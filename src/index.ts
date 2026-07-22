@@ -7,7 +7,7 @@
  * application re-derives them. Consumers include independent CUNY apps and
  * scripts, Kale apps, and centrally hosted CAIL tools.
  *
- * Design contract (see README, invariants I1–I9):
+ * Design contract (see README):
  *   - Pure Web-standard `fetch`/`Request`/`Response` — runs unchanged in the
  *     browser, Cloudflare Workers, and Node >=20. No SDK deps.
  *   - Exactly ONE credential reaches the wire (I1): the JWT path strips any
@@ -29,8 +29,8 @@
  *     `chatFetch()` adapts the chat endpoint for OpenAI-style SDKs without
  *     adding client-side retries. Gateway-declared non-retryable errors throw
  *     by default so SDK status heuristics cannot replay an ambiguous request.
- *   - Legacy quota headers remain parseable as an all-or-none compatibility
- *     surface; the current gateway does not emit them (I9).
+ *   - Catalog and quota reads validate bounded CAIL-defined plain-data
+ *     contracts; retired advisory quota headers are not supported.
  *
  * The public surface uses Web-standard fetch, Request, Response, and
  * AbortSignal types supported by browsers, Workers, and Node >=20.
@@ -76,7 +76,7 @@ export type CailCredential =
 /** Optional per-call metadata (I3). Merged with any `X-CAIL-Metadata` in `init`. */
 export type CailMetadata = Record<string, string | number>;
 
-/** Legacy advisory quota meter retained for response compatibility (I9). */
+/** Shared quota values returned by the canonical `GET /quota` snapshot. */
 export interface CailQuota {
   limit: number;
   used: number;
@@ -92,6 +92,40 @@ export interface CailQuotaSnapshot extends CailQuota {
   subject: string;
   enforced: boolean;
   as_of: number;
+}
+
+export type CailModelTier = "recommended" | "advanced";
+export type CailModelStatus = "active" | "deprecated" | "retiring";
+export type CailModelModality = "text" | "image";
+export type CailModelProvider = "workers-ai" | "openrouter";
+export type CailPricingState = "catalog" | "verified-live" | "unverified";
+
+/** One validated entry from the public CAIL model catalog. */
+export interface CailModelCatalogEntry {
+  id: string;
+  object: "model";
+  recommended: boolean;
+  tier: CailModelTier;
+  order: number;
+  status: CailModelStatus;
+  modality: CailModelModality;
+  provider: CailModelProvider;
+  upstream_model: string;
+  pricing_known: CailPricingState;
+  streaming: boolean;
+  sunset: string | null;
+  capabilities: string[];
+  context_length: number | null;
+  registry_url: string | null;
+  name?: string;
+  description?: string;
+  task?: string;
+}
+
+/** Validated `GET /v1/catalog` list envelope. */
+export interface CailModelCatalog {
+  object: "list";
+  data: CailModelCatalogEntry[];
 }
 
 /**
@@ -309,6 +343,9 @@ export interface CailClient {
    */
   getCatalog(options?: CailCatalogOptions): Promise<Response>;
 
+  /** Read and validate the public catalog as CAIL-defined plain data. */
+  getCatalogSnapshot(options?: CailCatalogOptions): Promise<CailModelCatalog>;
+
   /**
    * Read the authenticated user or app subject's stateless quota snapshot from
    * `GET /quota`. A retryable read-through failure is retried at most once.
@@ -336,57 +373,12 @@ const UUID_V4_RE =
 const CAIL_SUBJECT_RE = /^cail-[0-9a-f]{32}$/;
 const APP_SUBJECT_RE = /^app-[0-9a-f]{32}$/;
 const QUOTA_STATE_VALUES = new Set(["ok", "stale"]);
-const QUOTA_INTEGER_RE = /^\d+$/;
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
 const MAX_EXTRACT_JSON_CHARS = 256 * 1024;
 const MAX_RESPONSE_METADATA_CHARS = 128;
 
-function parseQuotaInteger(value: string | null): number | null {
-  if (value === null || !QUOTA_INTEGER_RE.test(value)) return null;
-  const n = Number(value);
-  if (!Number.isSafeInteger(n) || n < 0) return null;
-  return n;
-}
-
 function isQuotaState(value: unknown): value is CailQuota["state"] {
   return typeof value === "string" && QUOTA_STATE_VALUES.has(value);
-}
-
-/**
- * Parse legacy advisory quota headers from a model-proxy response (I9). The six
- * `X-CAIL-Quota-*` headers are all-or-none: if any member is absent,
- * malformed, negative, unsafe, or has an unknown state, the meter is
- * unavailable and this returns `null`. The current gateway does not emit
- * these headers; this parser remains for semver compatibility with recorded
- * and older responses. Header problems are NEVER errors.
- */
-export function parseQuotaHeaders(headers: Headers): CailQuota | null {
-  const limit = parseQuotaInteger(headers.get("X-CAIL-Quota-Limit"));
-  const used = parseQuotaInteger(headers.get("X-CAIL-Quota-Used"));
-  const remaining = parseQuotaInteger(headers.get("X-CAIL-Quota-Remaining"));
-  const reset = parseQuotaInteger(headers.get("X-CAIL-Quota-Reset"));
-  const windowSeconds = parseQuotaInteger(headers.get("X-CAIL-Quota-Window"));
-  const state = headers.get("X-CAIL-Quota-State");
-
-  if (
-    limit === null ||
-    used === null ||
-    remaining === null ||
-    reset === null ||
-    windowSeconds === null ||
-    !isQuotaState(state)
-  ) {
-    return null;
-  }
-
-  return {
-    limit,
-    used,
-    remaining,
-    reset,
-    window_seconds: windowSeconds,
-    state,
-  };
 }
 
 /**
@@ -1084,6 +1076,159 @@ function quotaBodyUnknownError(status: number): CailError {
     `The CAIL backbone returned an unexpected quota response (status ${status}).`,
     status,
   );
+}
+
+function catalogBodyUnknownError(status: number): CailError {
+  return new CailError(
+    "unknown_error",
+    `The CAIL backbone returned an unexpected model catalog (status ${status}).`,
+    status,
+  );
+}
+
+const CATALOG_TIERS = new Set<CailModelTier>(["recommended", "advanced"]);
+const CATALOG_STATUSES = new Set<CailModelStatus>([
+  "active",
+  "deprecated",
+  "retiring",
+]);
+const CATALOG_MODALITIES = new Set<CailModelModality>(["text", "image"]);
+const CATALOG_PROVIDERS = new Set<CailModelProvider>([
+  "workers-ai",
+  "openrouter",
+]);
+const CATALOG_PRICING_STATES = new Set<CailPricingState>([
+  "catalog",
+  "verified-live",
+  "unverified",
+]);
+
+function catalogOptionalString(
+  value: unknown,
+  maxLength = 2_048,
+): value is string | undefined {
+  return (
+    value === undefined ||
+    (typeof value === "string" &&
+      value.length > 0 &&
+      value.length <= maxLength &&
+      !CREDENTIAL_CONTROL_CHAR_RE.test(value))
+  );
+}
+
+function parseCatalogEntry(
+  value: unknown,
+  status: number,
+): CailModelCatalogEntry {
+  if (!isRecord(value)) throw catalogBodyUnknownError(status);
+  const id = value["id"];
+  const tier = value["tier"];
+  const modelStatus = value["status"];
+  const modality = value["modality"];
+  const provider = value["provider"];
+  const pricingKnown = value["pricing_known"];
+  const capabilities = value["capabilities"];
+  const contextLength = value["context_length"];
+  const registryUrl = value["registry_url"];
+  const sunset = value["sunset"];
+
+  if (
+    typeof id !== "string" ||
+    id.length === 0 ||
+    id.length > 128 ||
+    CREDENTIAL_CONTROL_CHAR_RE.test(id) ||
+    value["object"] !== "model" ||
+    typeof value["recommended"] !== "boolean" ||
+    typeof tier !== "string" ||
+    !CATALOG_TIERS.has(tier as CailModelTier) ||
+    value["recommended"] !== (tier === "recommended") ||
+    typeof value["order"] !== "number" ||
+    !Number.isSafeInteger(value["order"]) ||
+    value["order"] < 0 ||
+    typeof modelStatus !== "string" ||
+    !CATALOG_STATUSES.has(modelStatus as CailModelStatus) ||
+    typeof modality !== "string" ||
+    !CATALOG_MODALITIES.has(modality as CailModelModality) ||
+    typeof provider !== "string" ||
+    !CATALOG_PROVIDERS.has(provider as CailModelProvider) ||
+    typeof value["upstream_model"] !== "string" ||
+    value["upstream_model"].length === 0 ||
+    value["upstream_model"].length > 128 ||
+    typeof pricingKnown !== "string" ||
+    !CATALOG_PRICING_STATES.has(pricingKnown as CailPricingState) ||
+    pricingKnown === "unverified" ||
+    typeof value["streaming"] !== "boolean" ||
+    (sunset !== null &&
+      (typeof sunset !== "string" ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(sunset))) ||
+    !Array.isArray(capabilities) ||
+    capabilities.length > 32 ||
+    capabilities.some(
+      (capability) =>
+        typeof capability !== "string" ||
+        capability.length === 0 ||
+        capability.length > 64 ||
+        CREDENTIAL_CONTROL_CHAR_RE.test(capability),
+    ) ||
+    new Set(capabilities).size !== capabilities.length ||
+    (contextLength !== null &&
+      (typeof contextLength !== "number" ||
+        !Number.isSafeInteger(contextLength) ||
+        contextLength < 1)) ||
+    (registryUrl !== null &&
+      (typeof registryUrl !== "string" ||
+        !registryUrl.startsWith("https://") ||
+        registryUrl.length > 2_048)) ||
+    !catalogOptionalString(value["name"], 256) ||
+    !catalogOptionalString(value["description"]) ||
+    !catalogOptionalString(value["task"], 256)
+  ) {
+    throw catalogBodyUnknownError(status);
+  }
+
+  const entry: CailModelCatalogEntry = {
+    id,
+    object: "model",
+    recommended: value["recommended"],
+    tier: tier as CailModelTier,
+    order: value["order"],
+    status: modelStatus as CailModelStatus,
+    modality: modality as CailModelModality,
+    provider: provider as CailModelProvider,
+    upstream_model: value["upstream_model"],
+    pricing_known: pricingKnown as CailPricingState,
+    streaming: value["streaming"],
+    sunset,
+    capabilities: [...capabilities] as string[],
+    context_length: contextLength,
+    registry_url: registryUrl,
+  };
+  if (typeof value["name"] === "string") entry.name = value["name"];
+  if (typeof value["description"] === "string") {
+    entry.description = value["description"];
+  }
+  if (typeof value["task"] === "string") entry.task = value["task"];
+  return entry;
+}
+
+/** Parse the CAIL-defined public model catalog independently of any SDK type. */
+export function parseCailModelCatalog(
+  body: unknown,
+  status = 200,
+): CailModelCatalog {
+  if (
+    !isRecord(body) ||
+    body["object"] !== "list" ||
+    !Array.isArray(body["data"]) ||
+    body["data"].length > 2_000
+  ) {
+    throw catalogBodyUnknownError(status);
+  }
+  const data = body["data"].map((entry) => parseCatalogEntry(entry, status));
+  if (new Set(data.map((entry) => entry.id)).size !== data.length) {
+    throw catalogBodyUnknownError(status);
+  }
+  return { object: "list", data };
 }
 
 function quotaBodyInteger(
@@ -1908,6 +2053,31 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     );
   }
 
+  async function getCatalogSnapshot(
+    options?: CailCatalogOptions,
+  ): Promise<CailModelCatalog> {
+    const response = await getCatalog(options);
+    let bodyText: string | null;
+    try {
+      bodyText = await responseTextWithinLimit(
+        response,
+        MAX_ERROR_BODY_BYTES,
+        options?.signal,
+      );
+    } catch {
+      if (options?.signal?.aborted) throw abortReason(options.signal);
+      throw catalogBodyUnknownError(response.status);
+    }
+    if (bodyText === null) throw catalogBodyUnknownError(response.status);
+    let body: unknown;
+    try {
+      body = JSON.parse(bodyText);
+    } catch {
+      throw catalogBodyUnknownError(response.status);
+    }
+    return parseCailModelCatalog(body, response.status);
+  }
+
   async function run(
     request: CailRunRequest,
     credential: CailCredential,
@@ -2183,6 +2353,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     chatFetch,
     call: call as CailClient["call"],
     getCatalog,
+    getCatalogSnapshot,
     getQuota,
   };
 }

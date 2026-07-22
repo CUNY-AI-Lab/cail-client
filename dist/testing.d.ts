@@ -6,16 +6,15 @@
  * imports it, so bundles that don't import it pay nothing for it.
  *
  * Why this exists: consumer tests kept hand-rolling the CAIL wire shapes —
- * the error envelope, the `quota_exceeded` 429, the `/quota` snapshot body,
- * and legacy `X-CAIL-Quota-*` headers — and drifting from the contract the
- * client actually consumes (`parseCailError` / `extractCailError` /
- * `getQuota` / `parseQuotaHeaders`). These builders emit the canonical shapes
+ * the error envelope, the `quota_exceeded` 429, and the `/quota` snapshot body
+ * — and drifting from the contract the client actually consumes
+ * (`parseCailError` / `extractCailError` / `getQuota`). These builders emit the canonical shapes
  * (per cail-gateway `docs/ERROR_CONTRACT.md` and reviewed consumer vectors) so
  * fixtures are built FROM the primitive instead of re-invented beside it.
  *
  * No test-framework imports; pure Web-standard code (`Response`, `Headers`).
  */
-import type { CailQuota, CailQuotaSnapshot } from "./index.js";
+import type { CailQuotaSnapshot } from "./index.js";
 /** The inner `error` member of the CAIL wire envelope. */
 export interface CailErrorEnvelopeError {
     /** Human-readable, safe to show verbatim. */
@@ -90,10 +89,4 @@ export type CailQuotaSnapshotBody = CailQuotaSnapshot & {
 export declare function quotaSnapshotBody(overrides?: Partial<CailQuotaSnapshot>): CailQuotaSnapshotBody;
 /** A 200 JSON `Response` carrying {@link quotaSnapshotBody} — mock `GET /quota` with it. */
 export declare function quotaSnapshotResponse(overrides?: Partial<CailQuotaSnapshot>): Response;
-/**
- * The six legacy advisory `X-CAIL-Quota-*` headers as a header record — the
- * all-or-none set `parseQuotaHeaders` still consumes for compatibility. The
- * current gateway does not emit these headers.
- */
-export declare function quotaHeaders(overrides?: Partial<CailQuota>): Record<string, string>;
 //# sourceMappingURL=testing.d.ts.map

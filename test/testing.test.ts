@@ -2,7 +2,7 @@
  * The blessed wire-shape fixtures (`@cuny-ai-lab/cail-client/testing`).
  *
  * Every builder must round-trip through the REAL consumer in this package —
- * `parseCailError`, `extractCailError`, `getQuota`, `parseQuotaHeaders` — so
+ * `parseCailError`, `extractCailError`, and `getQuota` — so
  * the fixture surface can never drift from what the client actually accepts.
  */
 import { describe, expect, it } from "vitest";
@@ -12,7 +12,6 @@ import {
   createCailClient,
   extractCailError,
   parseCailError,
-  parseQuotaHeaders,
   type CailCredential,
 } from "../src/index.js";
 import {
@@ -21,7 +20,6 @@ import {
   cailErrorResponse,
   quotaExceededEnvelope,
   quotaExceededResponse,
-  quotaHeaders,
   quotaSnapshotBody,
   quotaSnapshotResponse,
 } from "../src/testing.js";
@@ -173,27 +171,6 @@ describe("quotaSnapshotBody / quotaSnapshotResponse", () => {
   it("ships a canonical-shaped test subject", () => {
     expect(TEST_QUOTA_SUBJECT).toMatch(/^cail-[0-9a-f]{32}$/);
     expect(quotaSnapshotBody().object).toBe("quota");
-  });
-});
-
-describe("quotaHeaders", () => {
-  it("is the exact all-or-none set parseQuotaHeaders accepts", () => {
-    expect(parseQuotaHeaders(new Headers(quotaHeaders()))).toEqual({
-      limit: 10_000_000,
-      used: 630_000,
-      remaining: 9_370_000,
-      reset: 1_723_200_000,
-      window_seconds: 2_592_000,
-      state: "ok",
-    });
-  });
-
-  it("honors overrides", () => {
-    const parsed = parseQuotaHeaders(
-      new Headers(quotaHeaders({ remaining: 0, used: 10_000_000, state: "stale" })),
-    );
-    expect(parsed?.remaining).toBe(0);
-    expect(parsed?.state).toBe("stale");
   });
 });
 

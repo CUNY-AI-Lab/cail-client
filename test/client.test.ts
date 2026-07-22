@@ -1207,6 +1207,33 @@ describe("public model catalog", () => {
     ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
     expect(rec.captured).toHaveLength(0);
   });
+
+  it("returns a validated plain-data catalog snapshot", async () => {
+    const body = {
+      object: "list",
+      data: [
+        {
+          id: "@cf/example/model",
+          object: "model",
+          recommended: true,
+          tier: "recommended",
+          order: 1,
+          status: "active",
+          modality: "text",
+          provider: "workers-ai",
+          upstream_model: "@cf/example/model",
+          pricing_known: "catalog",
+          streaming: true,
+          sunset: null,
+          capabilities: ["text-generation"],
+          context_length: 32768,
+          registry_url: null,
+        },
+      ],
+    };
+    const { client } = wired(jsonOk(body));
+    await expect(client.getCatalogSnapshot()).resolves.toEqual(body);
+  });
 });
 
 // ── parseCailError as a standalone export ─────────────────────────────────

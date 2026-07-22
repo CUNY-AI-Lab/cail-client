@@ -1,0 +1,62 @@
+{
+  "contractRevision": "cail.model-gateway.v1",
+  "catalog": {
+    "object": "list",
+    "data": [
+      {
+        "id": "@cf/example/reviewed-model",
+        "object": "model",
+        "name": "Reviewed model",
+        "description": "Fixture model for CAIL consumer conformance.",
+        "task": "Text Generation",
+        "recommended": true,
+        "tier": "recommended",
+        "order": 1,
+        "status": "active",
+        "modality": "text",
+        "provider": "workers-ai",
+        "upstream_model": "@cf/example/reviewed-model",
+        "pricing_known": "catalog",
+        "streaming": true,
+        "sunset": null,
+        "capabilities": ["text-generation", "function-calling"],
+        "context_length": 32768,
+        "registry_url": "https://ailab.gc.cuny.edu/models/reviewed-model"
+      }
+    ]
+  },
+  "quota": {
+    "object": "quota",
+    "subject": "cail-11111111111111111111111111111111",
+    "unit": "microdollar",
+    "currency": "USD",
+    "window_seconds": 2592000,
+    "limit": 10000000,
+    "used": 630000,
+    "remaining": 9370000,
+    "reset": 1723200000,
+    "as_of": 1720600000,
+    "state": "ok",
+    "enforced": true
+  },
+  "quotaExceeded": {
+    "status": 429,
+    "headers": {
+      "content-type": "application/json",
+      "retry-after": "3600",
+      "x-cail-request-id": "22222222-2222-4222-8222-222222222222",
+      "x-request-id": "22222222-2222-4222-8222-222222222222",
+      "x-should-retry": "false"
+    },
+    "body": {
+      "error": {
+        "message": "The CAIL model budget is exhausted for this period.",
+        "type": "rate_limit_error",
+        "param": null,
+        "code": "quota_exceeded",
+        "cail": { "retry_after_seconds": 3600 }
+      }
+    }
+  },
+  "unsafeMetadataKeys": ["user_id", "app", "via", "__proto__", "constructor", "prototype"]
+}

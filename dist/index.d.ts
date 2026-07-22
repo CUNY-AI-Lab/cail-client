@@ -7,7 +7,7 @@
  * application re-derives them. Consumers include independent CUNY apps and
  * scripts, Kale apps, and centrally hosted CAIL tools.
  *
- * Design contract (see README, invariants I1–I9):
+ * Design contract (see README):
  *   - Pure Web-standard `fetch`/`Request`/`Response` — runs unchanged in the
  *     browser, Cloudflare Workers, and Node >=20. No SDK deps.
  *   - Exactly ONE credential reaches the wire (I1): the JWT path strips any
@@ -29,8 +29,8 @@
  *     `chatFetch()` adapts the chat endpoint for OpenAI-style SDKs without
  *     adding client-side retries. Gateway-declared non-retryable errors throw
  *     by default so SDK status heuristics cannot replay an ambiguous request.
- *   - Legacy quota headers remain parseable as an all-or-none compatibility
- *     surface; the current gateway does not emit them (I9).
+ *   - Catalog and quota reads validate bounded CAIL-defined plain-data
+ *     contracts; retired advisory quota headers are not supported.
  *
  * The public surface uses Web-standard fetch, Request, Response, and
  * AbortSignal types supported by browsers, Workers, and Node >=20.
@@ -60,7 +60,7 @@ export type CailCredential = {
 };
 /** Optional per-call metadata (I3). Merged with any `X-CAIL-Metadata` in `init`. */
 export type CailMetadata = Record<string, string | number>;
-/** Legacy advisory quota meter retained for response compatibility (I9). */
+/** Shared quota values returned by the canonical `GET /quota` snapshot. */
 export interface CailQuota {
     limit: number;
     used: number;
@@ -75,6 +75,37 @@ export interface CailQuotaSnapshot extends CailQuota {
     subject: string;
     enforced: boolean;
     as_of: number;
+}
+export type CailModelTier = "recommended" | "advanced";
+export type CailModelStatus = "active" | "deprecated" | "retiring";
+export type CailModelModality = "text" | "image";
+export type CailModelProvider = "workers-ai" | "openrouter";
+export type CailPricingState = "catalog" | "verified-live" | "unverified";
+/** One validated entry from the public CAIL model catalog. */
+export interface CailModelCatalogEntry {
+    id: string;
+    object: "model";
+    recommended: boolean;
+    tier: CailModelTier;
+    order: number;
+    status: CailModelStatus;
+    modality: CailModelModality;
+    provider: CailModelProvider;
+    upstream_model: string;
+    pricing_known: CailPricingState;
+    streaming: boolean;
+    sunset: string | null;
+    capabilities: string[];
+    context_length: number | null;
+    registry_url: string | null;
+    name?: string;
+    description?: string;
+    task?: string;
+}
+/** Validated `GET /v1/catalog` list envelope. */
+export interface CailModelCatalog {
+    object: "list";
+    data: CailModelCatalogEntry[];
 }
 /**
  * A typed CAIL backbone error. Thrown by `call()` on any non-2xx response (I4)
@@ -242,6 +273,8 @@ export interface CailClient {
      * or ambient browser credentials.
      */
     getCatalog(options?: CailCatalogOptions): Promise<Response>;
+    /** Read and validate the public catalog as CAIL-defined plain data. */
+    getCatalogSnapshot(options?: CailCatalogOptions): Promise<CailModelCatalog>;
     /**
      * Read the authenticated user or app subject's stateless quota snapshot from
      * `GET /quota`. A retryable read-through failure is retried at most once.
@@ -250,15 +283,6 @@ export interface CailClient {
      */
     getQuota(credential: CailCredential, options?: CailQuotaOptions): Promise<CailQuotaSnapshot>;
 }
-/**
- * Parse legacy advisory quota headers from a model-proxy response (I9). The six
- * `X-CAIL-Quota-*` headers are all-or-none: if any member is absent,
- * malformed, negative, unsafe, or has an unknown state, the meter is
- * unavailable and this returns `null`. The current gateway does not emit
- * these headers; this parser remains for semver compatibility with recorded
- * and older responses. Header problems are NEVER errors.
- */
-export declare function parseQuotaHeaders(headers: Headers): CailQuota | null;
 /**
  * Browser default `onAuthRequired` (I6): redirect to the proxy-supplied
  * `login_url` (SAME-ORIGIN ONLY — open-redirect guard) or, failing that, to
@@ -305,6 +329,8 @@ export declare function parseCailError(response: Response, signal?: AbortSignal 
  * Dependency-free, synchronous, cycle-safe.
  */
 export declare function extractCailError(value: unknown): CailError | null;
+/** Parse the CAIL-defined public model catalog independently of any SDK type. */
+export declare function parseCailModelCatalog(body: unknown, status?: number): CailModelCatalog;
 /**
  * Build a CAIL model-proxy client. Validates the `app` slug at construction
  * (I2) — an invalid slug throws immediately (fail fast) rather than at call time.

@@ -1,12 +1,9 @@
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   CailError,
   createCailClient,
-  parseQuotaHeaders,
   type CailCredential,
-  type CailQuota,
   type CailQuotaSnapshot,
 } from "../src/index.js";
 import { envelope, jsonOk, recordingFetch } from "./mock.js";
@@ -14,18 +11,8 @@ import { envelope, jsonOk, recordingFetch } from "./mock.js";
 const BASE = "https://api.ailab.example";
 const APP = "alt-text";
 const KEY: CailCredential = { kind: "key", token: "sk-cail-xyz" };
-const VECTORS_SHA256 =
-  "b08ca31a4cf146aa9331e531ca0d03328005a15851f465bd2233481c955cea5e";
-
 const vectorsUrl = new URL("./quota-wire-vectors.json", import.meta.url);
-const vectorsBytes = readFileSync(vectorsUrl);
-const vectorsText = vectorsBytes.toString("utf8");
-
-interface HeaderCase {
-  name: string;
-  headers: Record<string, string>;
-  expect: CailQuota | null;
-}
+const vectorsText = readFileSync(vectorsUrl, "utf8");
 
 interface QuotaBodyCase {
   name: string;
@@ -42,7 +29,6 @@ interface ErrorCase {
 }
 
 interface QuotaWireVectors {
-  header_cases: HeaderCase[];
   quota_body_cases: QuotaBodyCase[];
   error_cases: ErrorCase[];
 }
@@ -64,18 +50,6 @@ function clientFor(
 }
 
 describe("quota wire vectors", () => {
-  it("pins the vendored quota wire vectors SHA-256", () => {
-    expect(createHash("sha256").update(vectorsBytes).digest("hex")).toBe(
-      VECTORS_SHA256,
-    );
-  });
-
-  for (const c of vectors.header_cases) {
-    it(`parseQuotaHeaders: ${c.name}`, () => {
-      expect(parseQuotaHeaders(new Headers(c.headers))).toEqual(c.expect);
-    });
-  }
-
   for (const c of vectors.quota_body_cases) {
     it(`getQuota: ${c.name}`, async () => {
       const { rec, client } = clientFor(jsonOk(c.body));
@@ -231,14 +205,4 @@ describe("quota wire vectors", () => {
     }
   });
 
-  it("parseQuotaHeaders returns null when no quota headers are present", () => {
-    const response = new Response(null, {
-      headers: {
-        "content-type": "application/json",
-        "x-request-id": "req-123",
-      },
-    });
-
-    expect(parseQuotaHeaders(response.headers)).toBeNull();
-  });
 });

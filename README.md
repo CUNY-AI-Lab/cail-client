@@ -44,7 +44,7 @@ consuming repository's `.npmrc`. Never place an actual token in this file:
 //npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
 ```
 
-Pin a semver range, for example `"@cuny-ai-lab/cail-client": "^1.4.0"`, then
+Pin an exact release, for example `"@cuny-ai-lab/cail-client": "2.0.0"`, then
 run `bun install` with `NODE_AUTH_TOKEN` set in the environment to a GitHub
 PAT that has `read:packages` (supplied by a user-level `~/.npmrc` or a CI
 secret). Bun 1.3.5 reads the registry and token interpolation from `.npmrc`;
@@ -121,10 +121,9 @@ const response = await cail.run(
 );
 ```
 
-The successful `Response` is returned by reference. The current gateway does
-not emit the former `X-CAIL-Quota-*` advisory headers.
-`parseQuotaHeaders(response.headers)` remains available for compatibility with
-recorded and older responses and returns `null` when those headers are absent.
+The successful `Response` is returned by reference. Quota is read through the
+canonical authenticated `GET /quota` endpoint; the client does not implement
+the retired advisory quota-header path.
 
 `run()` is buffered. For streaming chat, use `chatCompletions()`.
 
@@ -215,7 +214,12 @@ browser credentials. The optional facet is `"text"`, `"image"`, or `"all"`.
 
 ```ts
 const publicCatalog = await cail.getCatalog({ modality: "all" });
+const catalog = await cail.getCatalogSnapshot({ modality: "text" });
 ```
+
+`getCatalog()` leaves the successful response body to the caller.
+`getCatalogSnapshot()` consumes a bounded body and validates the CAIL catalog
+contract before returning plain data.
 
 `call()` is available for authenticated non-model endpoints such as
 `/v1/models`, `/quota`, and key delegation. It rejects model invocation and the
@@ -362,8 +366,9 @@ been accounted for.
 - `CailClient.chatFetch(credential, options?): typeof fetch`-compatible adapter
 - `CailClient.call(path, init, credential, options?): Promise<Response>`
 - `CailClient.getCatalog(options?): Promise<Response>`
+- `CailClient.getCatalogSnapshot(options?): Promise<CailModelCatalog>`
 - `CailClient.getQuota(credential, options?): Promise<CailQuotaSnapshot>`
-- `parseQuotaHeaders(headers): CailQuota | null` — legacy response compatibility
+- `parseCailModelCatalog(value): CailModelCatalog`
 - `parseCailError(response, signal?): Promise<CailError>`
 - `extractCailError(value): CailError | null` — dig the typed CAIL envelope
   out of an already-consumed, SDK-wrapped error object (AI SDK `RetryError` →
@@ -390,7 +395,6 @@ import {
   quotaExceededResponse,  // + Retry-After and x-should-retry: false headers
   quotaSnapshotBody,      // valid GET /quota body
   quotaSnapshotResponse,  // 200 JSON Response for a mocked GET /quota
-  quotaHeaders,           // legacy all-or-none X-CAIL-Quota-* headers
 } from "@cuny-ai-lab/cail-client/testing";
 
 // Exactly what parseCailError / extractCailError consume:
@@ -402,7 +406,7 @@ const fetchImpl = async () => quotaSnapshotResponse({ remaining: 0, state: "stal
 ```
 
 Every builder is round-tripped in this package's own suite through
-`parseCailError`, `extractCailError`, `getQuota`, and `parseQuotaHeaders`, so
+`parseCailError`, `extractCailError`, and `getQuota`, so
 the fixtures cannot drift from the client. The subpath is additive test
 support: the runtime entry never imports it, and it imports no test
 framework. For canonical test *subjects* and identity-JWT minting, use
@@ -423,11 +427,11 @@ GitHub Packages token scoped only to that step, then runs the gate without
 registry credentials. The recording fetch tests assert outgoing URLs, methods,
 headers, credentials, signals, and bodies at the wire boundary.
 
-`test/quota-wire-vectors.json` is a consumer-owned fixture pinned by SHA-256.
-It is reviewed against the current gateway quota read-through and nested error
-contract. Its header cases cover the retained legacy parser; they do not claim
-that the current gateway emits quota headers. The client rejects the old flat
-error envelope and must not introduce a second schema.
+`contract/model-gateway-v1.json` is the packaged catalog/quota/error
+conformance fixture. The broader `test/quota-wire-vectors.json` suite is
+reviewed against the current gateway quota read-through and nested error
+contract. The client rejects the old flat error envelope and must not
+introduce a second schema.
 
 ## License
 
