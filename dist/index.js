@@ -660,7 +660,6 @@ const CATALOG_PROVIDERS = new Set([
 const CATALOG_PRICING_STATES = new Set([
     "catalog",
     "verified-live",
-    "unverified",
 ]);
 function catalogOptionalString(value, maxLength = 2_048) {
     return (value === undefined ||
@@ -705,7 +704,6 @@ function parseCatalogEntry(value, status) {
         value["upstream_model"].length > 128 ||
         typeof pricingKnown !== "string" ||
         !CATALOG_PRICING_STATES.has(pricingKnown) ||
-        pricingKnown === "unverified" ||
         typeof value["streaming"] !== "boolean" ||
         (sunset !== null &&
             (typeof sunset !== "string" ||

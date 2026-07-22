@@ -98,7 +98,7 @@ export type CailModelTier = "recommended" | "advanced";
 export type CailModelStatus = "active" | "deprecated" | "retiring";
 export type CailModelModality = "text" | "image";
 export type CailModelProvider = "workers-ai" | "openrouter";
-export type CailPricingState = "catalog" | "verified-live" | "unverified";
+export type CailPricingState = "catalog" | "verified-live";
 
 /** One validated entry from the public CAIL model catalog. */
 export interface CailModelCatalogEntry {
@@ -1100,7 +1100,6 @@ const CATALOG_PROVIDERS = new Set<CailModelProvider>([
 const CATALOG_PRICING_STATES = new Set<CailPricingState>([
   "catalog",
   "verified-live",
-  "unverified",
 ]);
 
 function catalogOptionalString(
@@ -1156,7 +1155,6 @@ function parseCatalogEntry(
     value["upstream_model"].length > 128 ||
     typeof pricingKnown !== "string" ||
     !CATALOG_PRICING_STATES.has(pricingKnown as CailPricingState) ||
-    pricingKnown === "unverified" ||
     typeof value["streaming"] !== "boolean" ||
     (sunset !== null &&
       (typeof sunset !== "string" ||

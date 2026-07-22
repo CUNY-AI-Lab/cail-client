@@ -80,7 +80,7 @@ export type CailModelTier = "recommended" | "advanced";
 export type CailModelStatus = "active" | "deprecated" | "retiring";
 export type CailModelModality = "text" | "image";
 export type CailModelProvider = "workers-ai" | "openrouter";
-export type CailPricingState = "catalog" | "verified-live" | "unverified";
+export type CailPricingState = "catalog" | "verified-live";
 /** One validated entry from the public CAIL model catalog. */
 export interface CailModelCatalogEntry {
     id: string;
