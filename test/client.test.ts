@@ -48,6 +48,34 @@ function readableBody(text = "hello-stream"): ReadableStream<Uint8Array> {
   });
 }
 
+function responseWithCancelFailure(
+  response: Response,
+  mode: "reject" | "never-settle",
+): { response: Response; cancelCalls: () => number } {
+  const body = response.body;
+  if (body === null) throw new Error("test response must have a body");
+  let cancelCalls = 0;
+  const cancel = () => {
+    cancelCalls++;
+    return mode === "reject"
+      ? Promise.reject(new Error("PRIVATE_CANCEL_SENTINEL"))
+      : new Promise<void>(() => {});
+  };
+  Object.defineProperty(body, "cancel", { configurable: true, value: cancel });
+  return { response, cancelCalls: () => cancelCalls };
+}
+
+function bytes(...parts: Uint8Array[]): Uint8Array {
+  const length = parts.reduce((total, part) => total + part.byteLength, 0);
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.byteLength;
+  }
+  return result;
+}
+
 // ── Credential forwarding (I1) ────────────────────────────────────────────
 
 describe("I1 — exactly one credential on the wire", () => {
@@ -503,6 +531,192 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
     });
   });
 
+  it("preserves a response-body read failure as the private cause", async () => {
+    const cause = new Error("PRIVATE_BODY_READ_SENTINEL");
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.error(cause);
+        },
+      }),
+      {
+        status: 502,
+        headers: {
+          "x-request-id": "22222222-2222-4222-8222-222222222222",
+        },
+      },
+    );
+
+    const err = await parseCailError(response);
+
+    expect(err).toMatchObject({
+      code: "unknown_error",
+      status: 502,
+      message:
+        "The CAIL backbone returned an unexpected response (status 502).",
+      extras: {
+        request_id: "22222222-2222-4222-8222-222222222222",
+      },
+    });
+    expect(err.cause).toBe(cause);
+    expect(err.message).not.toContain(cause.message);
+    expect(JSON.stringify(err.extras)).not.toContain(cause.message);
+  });
+
+  it("preserves a response-body read failure through the public call path", async () => {
+    const cause = new Error("PRIVATE_PUBLIC_BODY_READ_SENTINEL");
+    const fetchImpl = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(cause);
+          },
+        }),
+        {
+          status: 502,
+          headers: {
+            "x-request-id": "33333333-3333-4333-8333-333333333333",
+          },
+        },
+      )) as typeof fetch;
+    const client = createCailClient({
+      baseUrl: BASE,
+      app: APP,
+      fetchImpl,
+      maxRetries: 0,
+    });
+
+    const err = await client.call("/v1/models", {}, KEY).catch((error) => error);
+
+    expect(err).toMatchObject({
+      code: "unknown_error",
+      status: 502,
+      message:
+        "The CAIL backbone returned an unexpected response (status 502).",
+      extras: {
+        request_id: "33333333-3333-4333-8333-333333333333",
+      },
+    });
+    expect(err.cause).toBe(cause);
+    expect(err.message).not.toContain(cause.message);
+    expect(JSON.stringify(err.extras)).not.toContain(cause.message);
+  });
+
+  it("rejects malformed UTF-8 instead of fabricating a provider message", async () => {
+    const encoder = new TextEncoder();
+    const body = bytes(
+      encoder.encode('{"error":{"message":"'),
+      Uint8Array.of(0xff),
+      encoder.encode(
+        '","type":"server_error","param":null,"code":"provider_error"}}',
+      ),
+    );
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(body);
+          controller.close();
+        },
+      }),
+      {
+        status: 502,
+        headers: {
+          "x-request-id": "44444444-4444-4444-8444-444444444444",
+        },
+      },
+    );
+
+    const err = await parseCailError(response);
+
+    expect(err).toMatchObject({
+      code: "unknown_error",
+      status: 502,
+      message:
+        "The CAIL backbone returned an unexpected response (status 502).",
+      extras: {
+        request_id: "44444444-4444-4444-8444-444444444444",
+      },
+    });
+    expect(err.cause).toBeInstanceOf(TypeError);
+    expect(err.message).not.toContain("provider_error");
+    expect(err.message).not.toContain("\uFFFD");
+    expect(JSON.stringify(err.extras)).not.toContain("\uFFFD");
+  });
+
+  it("rejects an invalid UTF-8 sequence split across chunks and cancels the open reader", async () => {
+    const encoder = new TextEncoder();
+    let cancelObserved = false;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            bytes(
+              encoder.encode('{"error":{"message":"'),
+              Uint8Array.of(0xe2),
+            ),
+          );
+          controller.enqueue(
+            bytes(
+              Uint8Array.of(0x28),
+              encoder.encode(
+                '","type":"server_error","param":null,"code":"provider_error"}}',
+              ),
+            ),
+          );
+        },
+        cancel() {
+          cancelObserved = true;
+        },
+      }),
+      { status: 502 },
+    );
+
+    const err = await parseCailError(response);
+
+    expect(err.code).toBe("unknown_error");
+    expect(err.cause).toBeInstanceOf(TypeError);
+    expect(err.message).not.toContain("\uFFFD");
+    expect(cancelObserved).toBe(true);
+  });
+
+  it("preserves valid multibyte UTF-8 split across chunks", async () => {
+    const message = "Précisely 中文";
+    const encoded = new TextEncoder().encode(
+      JSON.stringify({
+        error: {
+          message,
+          type: "server_error",
+          param: null,
+          code: "provider_error",
+        },
+      }),
+    );
+    const middleCharacter = new TextEncoder().encode("中");
+    const characterStart = encoded.findIndex(
+      (value, index) =>
+        value === middleCharacter[0] &&
+        encoded[index + 1] === middleCharacter[1] &&
+        encoded[index + 2] === middleCharacter[2],
+    );
+    expect(characterStart).toBeGreaterThanOrEqual(0);
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoded.slice(0, characterStart + 1));
+          controller.enqueue(encoded.slice(characterStart + 1));
+          controller.close();
+        },
+      }),
+      { status: 502 },
+    );
+
+    const err = await parseCailError(response);
+
+    expect(err.code).toBe("provider_error");
+    expect(err.message).toBe(message);
+    expect(err.cause).toBeUndefined();
+  });
+
   it("ignores malformed or oversized response metadata", async () => {
     const { client } = wired(
       envelope(
@@ -745,6 +959,75 @@ describe("I5 — retry policy", () => {
       rec.captured[0]!.headers["idempotency-key"],
     );
   });
+
+  it.each([
+    ["retryable 5xx", "reject"],
+    ["retryable 5xx", "never-settle"],
+    ["idempotency conflict", "reject"],
+    ["idempotency conflict", "never-settle"],
+  ] as const)(
+    "%s retry is not blocked or masked when body cancellation must %s",
+    async (branch, cancelMode) => {
+      const first =
+        branch === "retryable 5xx"
+          ? envelope(500, { error: "server_error", message: "retry" })
+          : envelope(
+              409,
+              {
+                error: "idempotency_in_progress",
+                message: "still running",
+              },
+              { "retry-after": "0" },
+            );
+      const pendingCleanup = responseWithCancelFailure(first, cancelMode);
+      let calls = 0;
+      const fetchImpl = vi.fn(async () => {
+        calls++;
+        return calls === 1
+          ? pendingCleanup.response
+          : jsonOk({ ok: true });
+      }) as typeof fetch;
+      const client = createCailClient({
+        baseUrl: BASE,
+        app: APP,
+        fetchImpl,
+        maxRetries: 1,
+      });
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => {
+        unhandled.push(reason);
+      };
+      const diagnosticFailure = new Error("PRIVATE_DIAGNOSTIC_SENTINEL");
+      let diagnosticCalls = 0;
+      const consoleError = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {
+          diagnosticCalls++;
+          throw diagnosticFailure;
+        });
+      process.on("unhandledRejection", onUnhandled);
+
+      try {
+        const response =
+          branch === "retryable 5xx"
+            ? await client.call("/v1/models", { method: "GET" }, KEY)
+            : await client.run(
+                { model: "@cf/m/x", input: { prompt: "hi" } },
+                KEY,
+              );
+        expect(response.status).toBe(200);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(diagnosticCalls).toBe(0);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+        consoleError.mockRestore();
+      }
+
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(pendingCleanup.cancelCalls()).toBe(1);
+      expect(unhandled).toEqual([]);
+    },
+  );
 
   it("does not retry an unrelated 409 on a buffered model POST", async () => {
     const { rec, client } = wired([

@@ -161,7 +161,7 @@ export class CailError extends Error {
     this.param = param;
     this.status = status;
     this.extras = extras;
-    if (cause !== undefined) this.cause = cause;
+    if (arguments.length >= 7) this.cause = cause;
     // Preserve prototype chain when compiled to ES5-ish targets / bundlers.
     Object.setPrototypeOf(this, CailError.prototype);
   }
@@ -687,6 +687,27 @@ function validRetryAfter(value: string | null): string | null {
   return Number.isNaN(Date.parse(trimmed)) ? null : trimmed;
 }
 
+function isAbortError(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    (error as { name?: unknown }).name === "AbortError"
+  );
+}
+
+function beginBestEffortCleanup(cleanup: () => Promise<unknown>): void {
+  try {
+    void Promise.resolve(cleanup()).catch(() => {});
+  } catch {
+    // Cleanup is advisory and must not block or mask the request outcome.
+  }
+}
+
+function cancelResponseBody(response: Response): void {
+  if (response.body === null) return;
+  beginBestEffortCleanup(() => response.body!.cancel());
+}
+
 async function responseTextWithinLimit(
   response: Response,
   maxBytes = MAX_ERROR_BODY_BYTES,
@@ -699,7 +720,7 @@ async function responseTextWithinLimit(
     /^\d+$/.test(contentLength) &&
     Number(contentLength) > maxBytes
   ) {
-    void response.body?.cancel().catch(() => {});
+    cancelResponseBody(response);
     return null;
   }
 
@@ -709,19 +730,12 @@ async function responseTextWithinLimit(
       return new TextEncoder().encode(text).byteLength <= maxBytes ? text : null;
     } catch (err) {
       if (signal?.aborted) throw abortReason(signal);
-      if (
-        err &&
-        typeof err === "object" &&
-        (err as { name?: unknown }).name === "AbortError"
-      ) {
-        throw err;
-      }
-      return "";
+      throw err;
     }
   }
 
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   let total = 0;
   let text = "";
   try {
@@ -734,23 +748,21 @@ async function responseTextWithinLimit(
       }
       total += chunk.value.byteLength;
       if (total > maxBytes) {
-        void reader.cancel().catch(() => {});
+        beginBestEffortCleanup(() => reader.cancel());
         return null;
       }
       text += decoder.decode(chunk.value, { stream: true });
     }
   } catch (err) {
+    beginBestEffortCleanup(() => reader.cancel());
     if (signal?.aborted) throw abortReason(signal);
-    if (
-      err &&
-      typeof err === "object" &&
-      (err as { name?: unknown }).name === "AbortError"
-    ) {
-      throw err;
-    }
-    return "";
+    throw err;
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // Releasing an error-body reader must not mask its primary result.
+    }
   }
 }
 
@@ -769,11 +781,22 @@ export async function parseCailError(
   signal?: AbortSignal | null,
 ): Promise<CailError> {
   const status = response.status;
-  const bodyText = await responseTextWithinLimit(
-    response,
-    MAX_ERROR_BODY_BYTES,
-    signal,
-  );
+  let bodyText: string | null;
+  let bodyReadFailed = false;
+  let bodyReadCause: unknown;
+  try {
+    bodyText = await responseTextWithinLimit(
+      response,
+      MAX_ERROR_BODY_BYTES,
+      signal,
+    );
+  } catch (cause) {
+    if (signal?.aborted) throw abortReason(signal);
+    if (isAbortError(cause)) throw cause;
+    bodyText = null;
+    bodyReadFailed = true;
+    bodyReadCause = cause;
+  }
 
   let parsed: unknown;
   if (bodyText !== null) {
@@ -796,12 +819,18 @@ export async function parseCailError(
   // Non-JSON / shape-invalid body: NOT swallowed, NOT thrown away (I4).
   const extras: Record<string, unknown> = {};
   addResponseMetadataExtras(response, extras);
-  return new CailError(
-    "unknown_error",
-    `The CAIL backbone returned an unexpected response (status ${status}).`,
-    status,
-    extras,
-  );
+  const message = `The CAIL backbone returned an unexpected response (status ${status}).`;
+  return bodyReadFailed
+    ? new CailError(
+        "unknown_error",
+        message,
+        status,
+        extras,
+        "unknown_error",
+        null,
+        bodyReadCause,
+      )
+    : new CailError("unknown_error", message, status, extras);
 }
 
 /** Try to parse a string as JSON; non-strings and unparseable strings pass through. */
@@ -1880,6 +1909,8 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         return response;
       }
 
+      let parsedError: CailError | null = null;
+
       // A transport retry can reach the gateway while the original buffered
       // request is still completing. Only this explicit idempotency conflict is
       // retryable; ordinary 4xx responses remain final.
@@ -1890,19 +1921,9 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         !hasNonReplayableBody &&
         attempt < retryLimit
       ) {
-        let conflict: CailError | null = null;
-        try {
-          conflict = await parseCailError(response.clone(), signal);
-        } catch {
-          if (signal?.aborted) throw abortReason(signal);
-          // An unreadable conflict is handled as an ordinary non-2xx below.
-        }
-        if (conflict?.code === "idempotency_in_progress") {
-          try {
-            await response.body?.cancel();
-          } catch {
-            /* ignore */
-          }
+        parsedError = await parseCailError(response, signal);
+        if (parsedError.code === "idempotency_in_progress") {
+          cancelResponseBody(response);
           await sleep(retryDelayMs(response, attempt), signal);
           attempt++;
           continue;
@@ -1921,19 +1942,15 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         !hasNonReplayableBody &&
         attempt < retryLimit
       ) {
-        // Drain the failed response body so the connection can be reused.
-        try {
-          await response.body?.cancel();
-        } catch {
-          /* ignore */
-        }
+        // Start cancelling the failed body so cleanup cannot hold up the retry.
+        cancelResponseBody(response);
         await sleep(retryDelayMs(response, attempt), signal);
         attempt++;
         continue;
       }
 
       // I4 — non-2xx (and non-retriable, or retries exhausted) → typed error.
-      const error = await parseCailError(response, signal);
+      const error = parsedError ?? (await parseCailError(response, signal));
 
       // I6 — 401 authentication_required hook, then still throw.
       if (
