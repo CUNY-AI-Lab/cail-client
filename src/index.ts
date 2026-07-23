@@ -785,30 +785,11 @@ export async function parseCailError(
   }
 
   if (isRecord(parsed) && isRecord(parsed["error"])) {
-    const error = parsed["error"];
-    const cail = error["cail"];
-    const param = error["param"];
-    const validCail = cail === undefined || isRecord(cail);
-    const validParam = param === null || typeof param === "string";
-    if (
-      typeof error["message"] === "string" &&
-      typeof error["type"] === "string" &&
-      typeof error["code"] === "string" &&
-      validParam &&
-      validCail
-    ) {
-      const extras: Record<string, unknown> =
-        cail === undefined ? {} : { ...cail };
+    const error = cailErrorFromEnvelope(parsed["error"], status);
+    if (error !== null) {
       // Preserve Retry-After alongside the CAIL extension fields.
-      addResponseMetadataExtras(response, extras);
-      return new CailError(
-        error["code"],
-        error["message"],
-        status,
-        extras,
-        error["type"],
-        param as string | null,
-      );
+      addResponseMetadataExtras(response, error.extras);
+      return error;
     }
   }
 
@@ -863,8 +844,7 @@ function cailErrorFromEnvelope(
   const cail = error["cail"];
   const param = error["param"];
   const validCail = cail === undefined || isRecord(cail);
-  const validParam =
-    param === undefined || param === null || typeof param === "string";
+  const validParam = param === null || typeof param === "string";
   if (
     typeof error["message"] !== "string" ||
     typeof error["type"] !== "string" ||
