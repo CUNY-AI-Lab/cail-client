@@ -347,10 +347,33 @@ function validRetryAfter(value) {
     }
     return Number.isNaN(Date.parse(trimmed)) ? null : trimmed;
 }
+const domExceptionNameGetter = typeof DOMException === "undefined"
+    ? undefined
+    : Object.getOwnPropertyDescriptor(DOMException.prototype, "name")?.get;
 function isAbortError(error) {
-    return (error !== null &&
-        typeof error === "object" &&
-        error.name === "AbortError");
+    if (error === null || typeof error !== "object")
+        return false;
+    try {
+        let current = error;
+        while (current !== null) {
+            const descriptor = Object.getOwnPropertyDescriptor(current, "name");
+            if (descriptor !== undefined) {
+                if ("value" in descriptor)
+                    return descriptor.value === "AbortError";
+                if (domExceptionNameGetter !== undefined &&
+                    current === DOMException.prototype &&
+                    descriptor.get === domExceptionNameGetter) {
+                    return domExceptionNameGetter.call(error) === "AbortError";
+                }
+                return false;
+            }
+            current = Object.getPrototypeOf(current);
+        }
+    }
+    catch {
+        // Error classification must never replace the error being classified.
+    }
+    return false;
 }
 function beginBestEffortCleanup(cleanup) {
     try {
@@ -667,11 +690,19 @@ export function extractCailError(value) {
     }
     return null;
 }
-function quotaBodyUnknownError(status) {
-    return new CailError("unknown_error", `The CAIL backbone returned an unexpected quota response (status ${status}).`, status);
+function quotaBodyUnknownError(status, cause) {
+    const message = `The CAIL backbone returned an unexpected quota response (status ${status}).`;
+    if (arguments.length >= 2) {
+        return new CailError("unknown_error", message, status, {}, "unknown_error", null, cause);
+    }
+    return new CailError("unknown_error", message, status);
 }
-function catalogBodyUnknownError(status) {
-    return new CailError("unknown_error", `The CAIL backbone returned an unexpected model catalog (status ${status}).`, status);
+function catalogBodyUnknownError(status, cause) {
+    const message = `The CAIL backbone returned an unexpected model catalog (status ${status}).`;
+    if (arguments.length >= 2) {
+        return new CailError("unknown_error", message, status, {}, "unknown_error", null, cause);
+    }
+    return new CailError("unknown_error", message, status);
 }
 const CATALOG_TIERS = new Set(["recommended", "advanced"]);
 const CATALOG_STATUSES = new Set([
@@ -1295,10 +1326,10 @@ export function createCailClient(opts) {
         try {
             bodyText = await responseTextWithinLimit(response, MAX_ERROR_BODY_BYTES, options?.signal);
         }
-        catch {
+        catch (cause) {
             if (options?.signal?.aborted)
                 throw abortReason(options.signal);
-            throw quotaBodyUnknownError(response.status);
+            throw quotaBodyUnknownError(response.status, cause);
         }
         if (bodyText === null)
             throw quotaBodyUnknownError(response.status);
@@ -1336,10 +1367,10 @@ export function createCailClient(opts) {
         try {
             bodyText = await responseTextWithinLimit(response, MAX_ERROR_BODY_BYTES, options?.signal);
         }
-        catch {
+        catch (cause) {
             if (options?.signal?.aborted)
                 throw abortReason(options.signal);
-            throw catalogBodyUnknownError(response.status);
+            throw catalogBodyUnknownError(response.status, cause);
         }
         if (bodyText === null)
             throw catalogBodyUnknownError(response.status);

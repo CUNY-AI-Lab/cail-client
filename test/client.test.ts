@@ -11,6 +11,10 @@ import {
   type CailCredential,
 } from "../src/index.js";
 import {
+  createCailClient as createDistCailClient,
+  parseCailError as parseDistCailError,
+} from "../dist/index.js";
+import {
   recordingFetch,
   jsonOk,
   envelope,
@@ -50,13 +54,14 @@ function readableBody(text = "hello-stream"): ReadableStream<Uint8Array> {
 
 function responseWithCancelFailure(
   response: Response,
-  mode: "reject" | "never-settle",
+  mode: "throw" | "reject" | "never-settle",
 ): { response: Response; cancelCalls: () => number } {
   const body = response.body;
   if (body === null) throw new Error("test response must have a body");
   let cancelCalls = 0;
   const cancel = () => {
     cancelCalls++;
+    if (mode === "throw") throw new Error("PRIVATE_CANCEL_SENTINEL");
     return mode === "reject"
       ? Promise.reject(new Error("PRIVATE_CANCEL_SENTINEL"))
       : new Promise<void>(() => {});
@@ -602,6 +607,64 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
     expect(JSON.stringify(err.extras)).not.toContain(cause.message);
   });
 
+  it.each([
+    ["source", createCailClient, parseCailError],
+    ["dist", createDistCailClient, parseDistCailError],
+  ] as const)(
+    "%s keeps a hostile abort-name accessor private on direct and public paths",
+    async (_build, createClient, parseError) => {
+      const accessorFailure = new Error("PRIVATE_ACCESSOR_SENTINEL");
+      const cause = {};
+      Object.defineProperty(cause, "name", {
+        get() {
+          throw accessorFailure;
+        },
+      });
+      const response = () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.error(cause);
+            },
+          }),
+          { status: 502 },
+        );
+
+      const direct = await parseError(response());
+      expect(direct).toMatchObject({
+        code: "unknown_error",
+        status: 502,
+        message:
+          "The CAIL backbone returned an unexpected response (status 502).",
+        extras: {},
+      });
+      expect(direct.cause).toBe(cause);
+
+      const client = createClient({
+        baseUrl: BASE,
+        app: APP,
+        fetchImpl: (async () => response()) as typeof fetch,
+        maxRetries: 0,
+      });
+      const publicError = await client
+        .call("/v1/models", {}, KEY)
+        .catch((error) => error);
+      expect(publicError).toMatchObject({
+        code: "unknown_error",
+        status: 502,
+        message:
+          "The CAIL backbone returned an unexpected response (status 502).",
+        extras: {},
+      });
+      expect(publicError.cause).toBe(cause);
+      expect(publicError).not.toBe(accessorFailure);
+      expect(publicError.message).not.toContain(accessorFailure.message);
+      expect(JSON.stringify(publicError.extras)).not.toContain(
+        accessorFailure.message,
+      );
+    },
+  );
+
   it("rejects malformed UTF-8 instead of fabricating a provider message", async () => {
     const encoder = new TextEncoder();
     const body = bytes(
@@ -961,8 +1024,10 @@ describe("I5 — retry policy", () => {
   });
 
   it.each([
+    ["retryable 5xx", "throw"],
     ["retryable 5xx", "reject"],
     ["retryable 5xx", "never-settle"],
+    ["idempotency conflict", "throw"],
     ["idempotency conflict", "reject"],
     ["idempotency conflict", "never-settle"],
   ] as const)(
@@ -1551,6 +1616,41 @@ describe("public model catalog", () => {
     const { client } = wired(jsonOk(body));
     await expect(client.getCatalogSnapshot()).resolves.toEqual(body);
   });
+
+  it("keeps a catalog body-read failure as the private cause", async () => {
+    const cause = new Error("PRIVATE_CATALOG_READ_SENTINEL");
+    const { client } = wired(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(cause);
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const err = await client.getCatalogSnapshot().catch((error) => error);
+
+    expect(err).toMatchObject({
+      code: "unknown_error",
+      status: 200,
+      message:
+        "The CAIL backbone returned an unexpected model catalog (status 200).",
+      extras: {},
+    });
+    expect(err.cause).toBe(cause);
+    expect(err.message).not.toContain(cause.message);
+    expect(JSON.stringify(err.extras)).not.toContain(cause.message);
+  });
+
+  it("does not fabricate a catalog cause for malformed JSON", async () => {
+    const { client } = wired(new Response("{", { status: 200 }));
+    const err = await client.getCatalogSnapshot().catch((error) => error);
+
+    expect(err).toMatchObject({ code: "unknown_error", status: 200 });
+    expect(Object.hasOwn(err, "cause")).toBe(false);
+  });
 });
 
 // ── parseCailError as a standalone export ─────────────────────────────────
@@ -1580,19 +1680,25 @@ describe("parseCailError (standalone)", () => {
     expect(err.code).toBe("unknown_error");
   });
 
-  it("preserves AbortError thrown while reading an error body", async () => {
-    const response = new Response(null, { status: 400 });
-    Object.defineProperty(response, "text", {
-      value: async () => {
-        throw new DOMException("aborted", "AbortError");
-      },
-    });
+  it.each([
+    ["source", parseCailError],
+    ["dist", parseDistCailError],
+  ] as const)(
+    "%s preserves a genuine AbortError thrown while reading an error body",
+    async (_build, parseError) => {
+      const response = new Response(null, { status: 400 });
+      Object.defineProperty(response, "text", {
+        value: async () => {
+          throw new DOMException("aborted", "AbortError");
+        },
+      });
 
-    const err = await parseCailError(response).catch((e) => e);
+      const err = await parseError(response).catch((e) => e);
 
-    expect(err).not.toBeInstanceOf(CailError);
-    expect(err.name).toBe("AbortError");
-  });
+      expect(err).not.toBeInstanceOf(CailError);
+      expect(err.name).toBe("AbortError");
+    },
+  );
 });
 
 // ── I8 extension — canonical chat completions ─────────────────────────────

@@ -176,6 +176,40 @@ describe("quota wire vectors", () => {
     await expect(pending).rejects.toBe(reason);
   });
 
+  it("keeps a quota body-read failure as the private cause", async () => {
+    const cause = new Error("PRIVATE_QUOTA_READ_SENTINEL");
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.error(cause);
+        },
+      }),
+      { status: 200 },
+    );
+    const { client } = clientFor(response, 0);
+
+    const err = await client.getQuota(KEY).catch((error) => error);
+
+    expect(err).toMatchObject({
+      code: "unknown_error",
+      status: 200,
+      message:
+        "The CAIL backbone returned an unexpected quota response (status 200).",
+      extras: {},
+    });
+    expect(err.cause).toBe(cause);
+    expect(err.message).not.toContain(cause.message);
+    expect(JSON.stringify(err.extras)).not.toContain(cause.message);
+  });
+
+  it("does not fabricate a quota cause for malformed JSON", async () => {
+    const { client } = clientFor(new Response("{", { status: 200 }), 0);
+    const err = await client.getQuota(KEY).catch((error) => error);
+
+    expect(err).toMatchObject({ code: "unknown_error", status: 200 });
+    expect(Object.hasOwn(err, "cause")).toBe(false);
+  });
+
   it("rejects malformed read-through identity and unit fields", async () => {
     const valid = {
       object: "quota",
@@ -204,5 +238,4 @@ describe("quota wire vectors", () => {
       });
     }
   });
-
 });
