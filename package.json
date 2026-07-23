@@ -31,10 +31,10 @@
   "packageManager": "bun@1.3.5",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "check": "bun run check:format && bun run typecheck && bun run test && bun run check:package && bun run check:dist",
+    "check": "bun run check:format && bun run typecheck && bun run test && bun run check:dist && bun run check:package",
     "check:dist": "bun scripts/check-dist.ts",
     "check:format": "bun scripts/check-format.ts",
-    "check:package": "bun pm pack --dry-run",
+    "check:package": "bun pm pack --dry-run --ignore-scripts",
     "check:clean": "bun scripts/check-clean.ts",
     "check:publication-authority": "bun scripts/check-publication-authority.ts",
     "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.test.json",

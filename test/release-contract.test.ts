@@ -123,11 +123,20 @@ describe("release and CI boundary", () => {
     expect(packageJson.scripts?.["check"]).toContain("bun run test");
     expect(packageJson.scripts?.["check"]).toContain("bun run check:package");
     expect(packageJson.scripts?.["check"]).toContain("bun run check:dist");
+    expect(
+      packageJson.scripts?.["check"]?.indexOf("bun run check:dist"),
+    ).toBeLessThan(
+      packageJson.scripts?.["check"]?.indexOf("bun run check:package") ??
+        -1,
+    );
     expect(packageJson.scripts?.["check:format"]).toBe(
       "bun scripts/check-format.ts",
     );
     expect(packageJson.scripts?.["check:dist"]).toBe(
       "bun scripts/check-dist.ts",
+    );
+    expect(packageJson.scripts?.["check:package"]).toBe(
+      "bun pm pack --dry-run --ignore-scripts",
     );
     expect(packageJson.scripts?.["check:clean"]).toBe(
       "bun scripts/check-clean.ts",
