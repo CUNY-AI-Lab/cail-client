@@ -35,6 +35,10 @@ const CORR: CailCorrelation = {
   trace_flags: 1,
   request_id: "9f50d4a4-ef70-41b2-b225-0a5cbf2df5e7",
 };
+const CORR_V7: CailCorrelation = {
+  ...CORR,
+  request_id: "019f8bdc-342a-76e1-ba71-005d69808f86",
+};
 const WIRE_TRACEPARENT = `00-${CORR.trace_id}-${CORR.span_id}-0${CORR.trace_flags}`;
 
 function wired(
@@ -75,6 +79,13 @@ describe("C-A — correlation contract re-exported verbatim from cail-log", () =
     expect(adopted.request_id).toBe(CORR.request_id); // request id adopted verbatim
     expect(adopted.span_id).not.toBe(CORR.span_id); // fresh span per hop (L7)
     expect(adopted.trace_flags).toBe(1); // inbound sampling decision preserved
+  });
+
+  it("C3a preserves the reviewed UUIDv7 request-ID contract verbatim", () => {
+    const outbound = outboundCorrelationHeaders(CORR_V7);
+    const adopted = correlationFromHeaders(new Headers(outbound));
+    expect(outbound[CAIL_REQUEST_ID_HEADER]).toBe(CORR_V7.request_id);
+    expect(adopted.request_id).toBe(CORR_V7.request_id);
   });
 
   it("C3b unsampled correlation stays unsampled and the options type is re-exported", () => {

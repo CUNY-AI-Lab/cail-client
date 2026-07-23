@@ -50,12 +50,25 @@ PAT that has `read:packages` (supplied by a user-level `~/.npmrc` or a CI
 secret). Bun 1.3.5 reads the registry and token interpolation from `.npmrc`;
 the npm CLI is not required.
 
-Maintainers keep authentication outside the repository, set
-`NODE_AUTH_TOKEN` to a classic GitHub PAT with `write:packages`, verify with
+Maintainers keep authentication outside the repository. The source checkout
+pins the independently reviewed cail-log 0.6.0 tarball under `vendor/` so
+frozen installs and tests need no sibling repository or package credential.
+That source-only artifact is excluded from the packed client; the published
+client truthfully depends on exact `@cuny-ai-lab/cail-log` 0.6.0 from GitHub
+Packages.
+
+Client publication remains blocked until the registry contains the reviewed
+cail-log artifact and a separate reviewed immutable registry receipt is added;
+changing the source-authority status alone cannot authorize publication.
+An exact source archive may run `bun install --frozen-lockfile` and
+`bun run check` without Git history. Publication is intentionally limited to a
+clean Git checkout and fails closed with a clear error in archive mode.
+
+After the registry receipt is independently accepted, set `NODE_AUTH_TOKEN` to
+a classic GitHub PAT with `write:packages`, verify with
 `bun publish --dry-run`, and release with `bun publish`. Both commands invoke
-the complete `prepublishOnly` gate and require a clean worktree before any
-registry mutation. GitHub Actions may instead use a repository `GITHUB_TOKEN`
-with `packages: write`.
+the complete `prepublishOnly` gate before any registry mutation. GitHub Actions
+may instead use a repository `GITHUB_TOKEN` with `packages: write`.
 
 ## Construct a client
 
@@ -281,7 +294,7 @@ Pass a `CailCorrelation` from `correlationFromHeaders()` through
 `X-CAIL-Request-Id` as one unit, using `outboundCorrelationHeaders()`. If the
 correlation has no `tracestate`, a caller-supplied stale value is removed.
 The sampling bit in `trace_flags` is preserved, and request IDs are lowercase
-UUID v4 values. Malformed correlation fails before fetch. The package
+UUID v4 or UUID v7 values. Malformed correlation fails before fetch. The package
 re-exports the cail-log correlation functions, types, and all three header
 constants. Its logging schema-v2, versioned-subject, and event-provenance APIs
 remain logger concerns; this transport does not construct or reinterpret log

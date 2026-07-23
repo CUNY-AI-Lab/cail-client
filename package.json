@@ -32,14 +32,15 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "bun run check:format && bun run typecheck && bun run test && bun run check:package && bun run check:dist",
-    "check:dist": "bun run build && git diff --exit-code -- dist && test -z \"$(git ls-files --others --ignored --exclude-standard dist)\"",
-    "check:format": "if git grep -nI -E '[[:blank:]]+$' -- .; then echo \"Tracked text files contain trailing whitespace.\"; exit 1; fi",
+    "check:dist": "bun scripts/check-dist.ts",
+    "check:format": "bun scripts/check-format.ts",
     "check:package": "bun pm pack --dry-run",
-    "check:clean": "test -z \"$(git status --porcelain --untracked-files=all)\"",
+    "check:clean": "bun scripts/check-clean.ts",
+    "check:publication-authority": "bun scripts/check-publication-authority.ts",
     "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "bun run check && bun run check:clean",
+    "prepublishOnly": "bun run check && bun run check:clean && bun run check:publication-authority",
     "prepare": "bun run build"
   },
   "dependencies": {

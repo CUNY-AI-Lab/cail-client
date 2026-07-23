@@ -17,7 +17,7 @@ jobs:
       - name: Check out client
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
       - name: Set up Bun
@@ -26,10 +26,6 @@ jobs:
           bun-version: 1.3.5
 
       - name: Install frozen dependencies
-        env:
-          # Scope registry access to dependency resolution. Tests, builds, and
-          # package hooks outside this step receive no package credential.
-          NODE_AUTH_TOKEN: ${{ secrets.CAIL_PACKAGES_TOKEN || github.token }}
         run: bun install --frozen-lockfile
 
       - name: Verify package-local release gate

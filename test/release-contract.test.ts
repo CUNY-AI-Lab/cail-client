@@ -1,12 +1,17 @@
-import { readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { isValidRegistryReceipt } from "../scripts/check-publication-authority.js";
 
+const root = fileURLToPath(new URL("../", import.meta.url));
 const packageJson = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
 ) as {
   dependencies?: Record<string, string>;
+  files?: string[];
   packageManager?: string;
   scripts?: Record<string, string>;
 };
@@ -22,14 +27,79 @@ const readme = readFileSync(
   new URL("../README.md", import.meta.url),
   "utf8",
 );
-const reviewedCailLogPath = fileURLToPath(
-  new URL("../../cail-log-review-final-hardening/", import.meta.url),
+const cailLogArtifact = fileURLToPath(
+  new URL(
+    "../vendor/cuny-ai-lab-cail-log-0.6.0.tgz",
+    import.meta.url,
+  ),
 );
+const cailLogAuthority = JSON.parse(
+  readFileSync(
+    new URL("../vendor/cail-log-0.6.0.authority.json", import.meta.url),
+    "utf8",
+  ),
+) as {
+  package: { name: string; version: string };
+  source: { commit: string; tree: string };
+  artifact: { path: string; bytes: number; sha256: string };
+  registry: {
+    url: string;
+    state: string;
+    observed_versions: string[];
+    required_receipt: string;
+  };
+  client_publication: { state: string; reason: string };
+};
 
 const CHECKOUT_ACTION =
   "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd";
 const SETUP_BUN_ACTION =
   "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6";
+const CAIL_LOG_SHA256 =
+  "8689422456eb4b7c672538ba91efb7606e9287df473a99a91ee2a60b5f9ba215";
+const RETRACTED_CAIL_LOG_SHA256 = [
+  "7db8a69e617f08b6fb0ff6ba432174c8",
+  "34b278ada239cd9cfd417e6cec85e401",
+].join("");
+const CAIL_LOG_FILES = [
+  "package/DESIGN.md",
+  "package/LICENSE",
+  "package/README.md",
+  "package/contract/operational-event-v2.json",
+  "package/dist/analytics-engine.d.ts",
+  "package/dist/analytics-engine.d.ts.map",
+  "package/dist/analytics-engine.js",
+  "package/dist/correlation.d.ts",
+  "package/dist/correlation.d.ts.map",
+  "package/dist/correlation.js",
+  "package/dist/event-provenance.d.ts",
+  "package/dist/event-provenance.d.ts.map",
+  "package/dist/event-provenance.js",
+  "package/dist/index.d.ts",
+  "package/dist/index.d.ts.map",
+  "package/dist/index.js",
+  "package/dist/logger.d.ts",
+  "package/dist/logger.d.ts.map",
+  "package/dist/logger.js",
+  "package/dist/schema.d.ts",
+  "package/dist/schema.d.ts.map",
+  "package/dist/schema.js",
+  "package/dist/secret-shape.d.ts",
+  "package/dist/secret-shape.d.ts.map",
+  "package/dist/secret-shape.js",
+  "package/dist/sensitive.d.ts",
+  "package/dist/sensitive.d.ts.map",
+  "package/dist/sensitive.js",
+  "package/package.json",
+  "package/src/analytics-engine.ts",
+  "package/src/correlation.ts",
+  "package/src/event-provenance.ts",
+  "package/src/index.ts",
+  "package/src/logger.ts",
+  "package/src/schema.ts",
+  "package/src/secret-shape.ts",
+  "package/src/sensitive.ts",
+].sort();
 
 describe("release and CI boundary", () => {
   it("pins reviewed CI actions and prevents checkout credential persistence", () => {
@@ -40,72 +110,211 @@ describe("release and CI boundary", () => {
     expect(ci).not.toMatch(/uses:\s*oven-sh\/setup-bun@v\d/);
   });
 
-  it("scopes package registry credentials to the frozen install step", () => {
-    const stepsStart = ci.indexOf("    steps:");
-    expect(stepsStart).toBeGreaterThan(0);
-    const jobConfiguration = ci.slice(0, stepsStart);
-    const installStart = ci.indexOf("- name: Install frozen dependencies");
-    const installEnd = ci.indexOf("\n      - name:", installStart + 1);
-    const installStep = ci.slice(installStart, installEnd);
-    expect(ci.match(/NODE_AUTH_TOKEN:/g)).toHaveLength(1);
-    expect(jobConfiguration).not.toContain("NODE_AUTH_TOKEN:");
-    expect(installStep).toContain("env:");
-    expect(installStep).toContain("NODE_AUTH_TOKEN:");
-    expect(installStep).toContain("run: bun install --frozen-lockfile");
+  it("uses a depth-one checkout and needs no package credential", () => {
+    expect(ci).toMatch(/fetch-depth:\s*1/);
+    expect(ci).not.toContain("NODE_AUTH_TOKEN");
+    expect(ci).toContain("run: bun install --frozen-lockfile");
   });
 
-  it("runs the complete local gate before Bun can publish", () => {
+  it("runs hermetic local gates before checking publication authority", () => {
     expect(packageJson.packageManager).toBe("bun@1.3.5");
     expect(packageJson.scripts?.["check"]).toContain("bun run check:format");
     expect(packageJson.scripts?.["check"]).toContain("bun run typecheck");
     expect(packageJson.scripts?.["check"]).toContain("bun run test");
     expect(packageJson.scripts?.["check"]).toContain("bun run check:package");
     expect(packageJson.scripts?.["check"]).toContain("bun run check:dist");
-    expect(packageJson.scripts?.["prepublishOnly"]).toContain("bun run check");
+    expect(packageJson.scripts?.["check:format"]).toBe(
+      "bun scripts/check-format.ts",
+    );
+    expect(packageJson.scripts?.["check:dist"]).toBe(
+      "bun scripts/check-dist.ts",
+    );
+    expect(packageJson.scripts?.["check:clean"]).toBe(
+      "bun scripts/check-clean.ts",
+    );
     expect(packageJson.scripts?.["prepublishOnly"]).toContain(
       "bun run check:clean",
     );
+    expect(packageJson.scripts?.["prepublishOnly"]).toContain(
+      "bun run check:publication-authority",
+    );
   });
 
-  it("requires the corrected cail-log 0.6 contract without a vulnerable 0.4 lock", () => {
+  it("locks source tests to the reviewed in-repo cail-log artifact", () => {
     expect(packageJson.dependencies?.["@cuny-ai-lab/cail-log"]).toBe("0.6.0");
+    expect(packageJson.files).not.toContain("vendor");
     expect(bunLock).toContain('"@cuny-ai-lab/cail-log": "0.6.0"');
     expect(bunLock).toContain(
-      "@cuny-ai-lab/cail-log@file:../cail-log-review-final-hardening",
+      "@cuny-ai-lab/cail-log@vendor/cuny-ai-lab-cail-log-0.6.0.tgz",
     );
+    expect(bunLock).not.toContain("file:../");
+    expect(bunLock).not.toContain("cail-log-review-final-hardening");
     expect(bunLock).not.toContain("@cuny-ai-lab/cail-log@0.4.0");
-    expect(
+    expect(cailLogAuthority).toMatchObject({
+      package: {
+        name: "@cuny-ai-lab/cail-log",
+        version: "0.6.0",
+      },
+      source: {
+        commit: "cb6ffc0cfd4cb544639cbf288ff6eb24c7027e98",
+        tree: "618c4bdfae0effadbe23cfd6c4dfb1fcf6440697",
+      },
+      artifact: {
+        path: "vendor/cuny-ai-lab-cail-log-0.6.0.tgz",
+        bytes: 50269,
+        sha256: CAIL_LOG_SHA256,
+      },
+    });
+  });
+
+  it("verifies artifact bytes, file list, exports, and installed content", () => {
+    const artifact = readFileSync(cailLogArtifact);
+    const artifactSha256 = createHash("sha256")
+      .update(artifact)
+      .digest("hex");
+    expect(statSync(cailLogArtifact).size).toBe(50269);
+    expect(artifactSha256).toBe(CAIL_LOG_SHA256);
+    expect(artifactSha256).not.toBe(RETRACTED_CAIL_LOG_SHA256);
+
+    const files = execFileSync("tar", ["-tzf", cailLogArtifact], {
+      encoding: "utf8",
+    })
+      .trim()
+      .split("\n")
+      .sort();
+    expect(files).toEqual(CAIL_LOG_FILES);
+
+    const packedPackageJson = JSON.parse(
       execFileSync(
-        "git",
-        ["-C", reviewedCailLogPath, "rev-parse", "HEAD^{commit}"],
-        { encoding: "utf8" },
-      ).trim(),
-    ).toBe("0f4c6c2a08a4de0f07f827fe99bd15c5ecdd6659");
-    expect(
-      execFileSync(
-        "git",
-        ["-C", reviewedCailLogPath, "rev-parse", "HEAD^{tree}"],
-        { encoding: "utf8" },
-      ).trim(),
-    ).toBe("d289a658e289ccd96122940bf7a4b7852e50fa75");
-    expect(
-      execFileSync(
-        "git",
-        [
-          "-C",
-          reviewedCailLogPath,
-          "status",
-          "--porcelain",
-          "--untracked-files=all",
-        ],
+        "tar",
+        ["-xOf", cailLogArtifact, "package/package.json"],
         { encoding: "utf8" },
       ),
-    ).toBe("");
+    ) as {
+      name: string;
+      version: string;
+      exports: Record<string, unknown>;
+    };
+    expect(packedPackageJson.name).toBe("@cuny-ai-lab/cail-log");
+    expect(packedPackageJson.version).toBe("0.6.0");
+    expect(packedPackageJson.exports).toEqual({
+      ".": {
+        types: "./dist/index.d.ts",
+        import: "./dist/index.js",
+        default: "./dist/index.js",
+      },
+      "./contract/operational-event-v2.json":
+        "./contract/operational-event-v2.json",
+    });
+
+    for (const entry of CAIL_LOG_FILES) {
+      const packed = execFileSync("tar", [
+        "-xOf",
+        cailLogArtifact,
+        entry,
+      ]);
+      const installed = readFileSync(
+        resolve(
+          root,
+          "node_modules/@cuny-ai-lab/cail-log",
+          entry.slice("package/".length),
+        ),
+      );
+      expect(installed.equals(packed), entry).toBe(true);
+    }
+  });
+
+  it("fails publication closed until a reviewed registry artifact exists", () => {
+    expect(cailLogAuthority.registry).toEqual({
+      url: "https://npm.pkg.github.com",
+      state: "unavailable",
+      observed_versions: ["0.4.0"],
+      required_receipt: "vendor/cail-log-0.6.0.registry-receipt.json",
+    });
+    expect(cailLogAuthority.client_publication.state).toBe("blocked");
+    expect(
+      existsSync(
+        new URL(
+          "../vendor/cail-log-0.6.0.registry-receipt.json",
+          import.meta.url,
+        ),
+      ),
+    ).toBe(false);
+    const publicationGate = spawnSync(
+      "bun",
+      ["run", "check:publication-authority"],
+      {
+        cwd: root,
+        encoding: "utf8",
+      },
+    );
+    expect(publicationGate.status).toBe(1);
+    const output =
+      (publicationGate.stdout ?? "") + (publicationGate.stderr ?? "");
+    expect(output).toContain("cail-client publication blocked");
+    expect(output).toContain("immutable registry receipt is required");
+    expect(output).not.toContain(RETRACTED_CAIL_LOG_SHA256);
+  });
+
+  it("rejects forged or inconsistent registry receipts", () => {
+    const receipt = {
+      schema_version: 1,
+      package: {
+        name: "@cuny-ai-lab/cail-log",
+        version: "0.6.0",
+      },
+      registry: {
+        url: "https://npm.pkg.github.com",
+        package_version_id: 1045860969,
+      },
+      artifact: {
+        bytes: 50269,
+        sha256: CAIL_LOG_SHA256,
+      },
+      independent_review: {
+        accepted_commit:
+          "cb6ffc0cfd4cb544639cbf288ff6eb24c7027e98",
+        accepted_tree:
+          "618c4bdfae0effadbe23cfd6c4dfb1fcf6440697",
+      },
+    };
+    expect(isValidRegistryReceipt(receipt)).toBe(true);
+    expect(
+      isValidRegistryReceipt({
+        ...receipt,
+        registry: { ...receipt.registry, package_version_id: 0 },
+      }),
+    ).toBe(false);
+    expect(
+      isValidRegistryReceipt({
+        ...receipt,
+        artifact: { ...receipt.artifact, sha256: "0".repeat(64) },
+      }),
+    ).toBe(false);
+    expect(
+      isValidRegistryReceipt({
+        ...receipt,
+        independent_review: {
+          ...receipt.independent_review,
+          accepted_commit: "0".repeat(40),
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isValidRegistryReceipt({
+        ...receipt,
+        independent_review: {
+          ...receipt.independent_review,
+          accepted_tree: "0".repeat(40),
+        },
+      }),
+    ).toBe(false);
   });
 
   it("documents Bun-native GitHub Packages publishing only", () => {
     expect(readme).toContain("bun publish --dry-run");
     expect(readme).toContain("bun publish");
+    expect(readme).toContain("publication remains blocked");
     expect(readme).not.toContain("npm publish");
     expect(readme).not.toMatch(/Bun .*cannot authenticate/i);
   });
