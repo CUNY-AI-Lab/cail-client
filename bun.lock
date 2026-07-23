@@ -5,7 +5,7 @@
     "": {
       "name": "@cuny-ai-lab/cail-client",
       "dependencies": {
-        "@cuny-ai-lab/cail-log": "^0.4.0",
+        "@cuny-ai-lab/cail-log": "0.6.0",
       },
       "devDependencies": {
         "@types/node": "^20.17.6",
@@ -15,7 +15,7 @@
     },
   },
   "packages": {
-    "@cuny-ai-lab/cail-log": ["@cuny-ai-lab/cail-log@0.4.0", "https://npm.pkg.github.com/download/@cuny-ai-lab/cail-log/0.4.0/67018d294dc7048944cbfab0361e46e148adaab4", {}, "sha512-V2WswlIra6BedHaf1T14JoL3RkTYkikJIusio5em9/E3PGVOdCDTKwzlszKOQ9o6t0qDhn2xs/kpqNcQIsBO4Q=="],
+    "@cuny-ai-lab/cail-log": ["@cuny-ai-lab/cail-log@file:../cail-log-review-final-hardening", { "devDependencies": { "@types/node": "^20.17.6", "typescript": "^5.6.3", "vitest": "^2.1.8" } }],
 
     "@esbuild/aix-ppc64": ["@esbuild/aix-ppc64@0.21.5", "", { "os": "aix", "cpu": "ppc64" }, "sha512-1SDgH6ZSPTlggy1yI6+Dbkiz8xzpHJEVAlF/AM1tHPLsf5STom9rwtjE4hKAF20FfXXNTFqEYXyJNWh1GiZedQ=="],
 

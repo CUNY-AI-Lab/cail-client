@@ -9,7 +9,7 @@
  *        of difference on the wire; malformed → client-side CailError before
  *        any transport attempt.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   createCailClient,
   CailError,
@@ -100,6 +100,91 @@ describe("C-A — correlation contract re-exported verbatim from cail-log", () =
     expect(adopted.request_id).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
+  });
+
+  it("C3d rejects coercible outbound identifiers without coercion", () => {
+    let coercions = 0;
+    const coercible = {
+      [Symbol.toPrimitive]() {
+        coercions += 1;
+        return CORR.trace_id;
+      },
+    };
+
+    expect(() =>
+      outboundCorrelationHeaders({
+        ...CORR,
+        trace_id: coercible as never,
+      }),
+    ).toThrow(TypeError);
+    expect(coercions).toBe(0);
+  });
+
+  it("C3e snapshots each outbound identifier once", () => {
+    const reads = new Map<string, number>();
+    const changing = <Value>(name: string, safe: Value, forged: Value) => {
+      const count = (reads.get(name) ?? 0) + 1;
+      reads.set(name, count);
+      return count === 1 ? safe : forged;
+    };
+    const correlation = {
+      get trace_id() {
+        return changing("trace_id", CORR.trace_id, "f".repeat(32));
+      },
+      get span_id() {
+        return changing("span_id", CORR.span_id, "f".repeat(16));
+      },
+      get trace_flags() {
+        return changing("trace_flags", 1 as const, 0 as const);
+      },
+      get request_id() {
+        return changing(
+          "request_id",
+          CORR.request_id,
+          "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        );
+      },
+      get tracestate() {
+        return changing("tracestate", "cail=trusted", "private=forged");
+      },
+    };
+
+    expect(outboundCorrelationHeaders(correlation)).toEqual({
+      traceparent: WIRE_TRACEPARENT,
+      tracestate: "cail=trusted",
+      "x-cail-request-id": CORR.request_id,
+    });
+    expect(Object.fromEntries(reads)).toEqual({
+      trace_id: 1,
+      span_id: 1,
+      trace_flags: 1,
+      request_id: 1,
+      tracestate: 1,
+    });
+  });
+
+  it("C3f fails boundedly instead of fabricating an all-zero identifier", () => {
+    let randomCalls = 0;
+    vi.stubGlobal("crypto", {
+      getRandomValues<T extends ArrayBufferView | null>(array: T): T {
+        randomCalls += 1;
+        if (array !== null) {
+          new Uint8Array(
+            array.buffer,
+            array.byteOffset,
+            array.byteLength,
+          ).fill(0);
+        }
+        return array;
+      },
+    });
+    try {
+      expect(() => correlationFromHeaders(new Headers())).toThrow(TypeError);
+      expect(randomCalls).toBeGreaterThan(1);
+      expect(randomCalls).toBeLessThanOrEqual(32);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -221,6 +306,28 @@ describe("C-B — options.correlation forwards the trace downstream", () => {
         correlation: bad,
       }),
     ).rejects.toMatchObject({ code: "invalid_correlation", status: 0 });
+    expect(rec.captured).toHaveLength(0);
+  });
+
+  it("C10c coercible correlation values fail without coercion or transport", async () => {
+    let coercions = 0;
+    const coercible = {
+      [Symbol.toPrimitive]() {
+        coercions += 1;
+        return CORR.trace_id;
+      },
+    };
+    const { rec, client } = wired(jsonOk({ ok: true }));
+
+    await expect(
+      client.call("/v1/models", { method: "GET" }, JWT, {
+        correlation: {
+          ...CORR,
+          trace_id: coercible as never,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "invalid_correlation", status: 0 });
+    expect(coercions).toBe(0);
     expect(rec.captured).toHaveLength(0);
   });
 

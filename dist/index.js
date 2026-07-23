@@ -70,8 +70,14 @@ export class CailError extends Error {
         this.param = param;
         this.status = status;
         this.extras = extras;
-        if (arguments.length >= 7)
-            this.cause = cause;
+        if (arguments.length >= 7) {
+            Object.defineProperty(this, "cause", {
+                configurable: true,
+                enumerable: false,
+                value: cause,
+                writable: true,
+            });
+        }
         // Preserve prototype chain when compiled to ES5-ish targets / bundlers.
         Object.setPrototypeOf(this, CailError.prototype);
         liveCailErrors.add(this);
@@ -401,7 +407,7 @@ function beginBestEffortCleanup(cleanup) {
         // Cleanup is advisory and must not block or mask the request outcome.
     }
 }
-function cancelResponseBody(response) {
+function discardResponseBody(response) {
     if (response.body === null)
         return;
     beginBestEffortCleanup(() => response.body.cancel());
@@ -413,7 +419,7 @@ async function responseTextWithinLimit(response, maxBytes = MAX_ERROR_BODY_BYTES
     if (contentLength !== null &&
         /^\d+$/.test(contentLength) &&
         Number(contentLength) > maxBytes) {
-        cancelResponseBody(response);
+        discardResponseBody(response);
         return null;
     }
     if (response.body === null) {
@@ -1353,6 +1359,7 @@ export function createCailClient(opts) {
             // success — throw immediately, no retry.
             if (response.type === "opaqueredirect" ||
                 (response.status >= 300 && response.status < 400)) {
+                discardResponseBody(response);
                 throw new CailError("unexpected_redirect", `The CAIL backbone returned a redirect (status ${response.status}), which is never a valid model-proxy response.`, response.status);
             }
             // I7 — 2xx passthrough by reference, body NOT buffered.
@@ -1393,10 +1400,15 @@ export function createCailClient(opts) {
                     if (internal.rawMode === "return" && shouldRetry === false) {
                         return response;
                     }
+                    discardResponseBody(response);
                     throw peek;
                 }
                 if (shouldRetry === false && internal.rawMode === "throw") {
-                    throw peek ?? (await parseCailError(response, signal));
+                    if (peek !== null) {
+                        discardResponseBody(response);
+                        throw peek;
+                    }
+                    throw await parseCailError(response, signal);
                 }
                 return response;
             }
@@ -1411,7 +1423,7 @@ export function createCailClient(opts) {
                 attempt < retryLimit) {
                 parsedError = await parseCailError(response, signal);
                 if (parsedError.code === "idempotency_in_progress") {
-                    cancelResponseBody(response);
+                    discardResponseBody(response);
                     await sleep(retryDelayMs(response, attempt), signal);
                     attempt++;
                     continue;
@@ -1428,7 +1440,7 @@ export function createCailClient(opts) {
                 !hasNonReplayableBody &&
                 attempt < retryLimit) {
                 // Start cancelling the failed body so cleanup cannot hold up the retry.
-                cancelResponseBody(response);
+                discardResponseBody(response);
                 await sleep(retryDelayMs(response, attempt), signal);
                 attempt++;
                 continue;

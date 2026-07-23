@@ -55,19 +55,35 @@ function readableBody(text = "hello-stream"): ReadableStream<Uint8Array> {
 
 function responseWithCancelFailure(
   response: Response,
-  mode: "throw" | "reject" | "never-settle",
+  mode: "resolve" | "throw" | "reject" | "never-settle",
 ): { response: Response; cancelCalls: () => number } {
-  const body = response.body;
-  if (body === null) throw new Error("test response must have a body");
   let cancelCalls = 0;
   const cancel = () => {
     cancelCalls++;
     if (mode === "throw") throw new Error("PRIVATE_CANCEL_SENTINEL");
-    return mode === "reject"
-      ? Promise.reject(new Error("PRIVATE_CANCEL_SENTINEL"))
-      : new Promise<void>(() => {});
+    if (mode === "reject") {
+      return Promise.reject(new Error("PRIVATE_CANCEL_SENTINEL"));
+    }
+    return mode === "never-settle"
+      ? new Promise<void>(() => {})
+      : Promise.resolve();
   };
-  Object.defineProperty(body, "cancel", { configurable: true, value: cancel });
+  const instrumentCurrentBody = () => {
+    const body = response.body;
+    if (body === null) throw new Error("test response must have a body");
+    Object.defineProperty(body, "cancel", { configurable: true, value: cancel });
+  };
+  instrumentCurrentBody();
+  const clone = response.clone.bind(response);
+  Object.defineProperty(response, "clone", {
+    configurable: true,
+    value: () => {
+      const result = clone();
+      // Response.clone() tees and replaces the original response's body.
+      instrumentCurrentBody();
+      return result;
+    },
+  });
   return { response, cancelCalls: () => cancelCalls };
 }
 
@@ -81,6 +97,177 @@ function bytes(...parts: Uint8Array[]): Uint8Array {
   }
   return result;
 }
+
+async function rejectionWithin(
+  promise: Promise<unknown>,
+  timeoutMs = 250,
+): Promise<unknown> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(
+        () => {
+          throw new Error("expected operation to reject");
+        },
+        (error: unknown) => error,
+      ),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("operation stalled during body cleanup")),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
+describe("CailError private cause", () => {
+  it.each([
+    ["source", CailError],
+    ["dist", DistCailError],
+  ] as const)(
+    "%s retains exact cause identity without exposing it to serialization",
+    (_build, ErrorClass) => {
+      const privateMessage = "PRIVATE_TRANSPORT_CAUSE";
+      let causeReflectionCalls = 0;
+      const cause = new Proxy(
+        Object.assign(new Error(privateMessage), {
+          requestBody: "PRIVATE_REQUEST_BODY",
+        }),
+        {
+          ownKeys() {
+            causeReflectionCalls++;
+            throw new Error("PRIVATE_CAUSE_REFLECTION");
+          },
+        },
+      );
+      const error = new ErrorClass(
+        "network_error",
+        "Network request failed.",
+        0,
+        {},
+        "unknown_error",
+        null,
+        cause,
+      );
+
+      expect(error.cause).toBe(cause);
+      expect(Object.getOwnPropertyDescriptor(error, "cause")).toMatchObject({
+        configurable: true,
+        enumerable: false,
+        value: cause,
+        writable: true,
+      });
+      expect(Object.keys(error)).not.toContain("cause");
+      const serialized = JSON.stringify(error);
+      expect(causeReflectionCalls).toBe(0);
+      expect(serialized).not.toContain(privateMessage);
+      expect(serialized).not.toContain("PRIVATE_REQUEST_BODY");
+      expect(serialized).not.toContain("PRIVATE_CAUSE_REFLECTION");
+    },
+  );
+});
+
+describe("abandoned response body cleanup", () => {
+  const CHAT_URL = `${BASE}/v1/chat/completions`;
+  const sdkInit: RequestInit = {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "@cf/m/x", messages: [] }),
+  };
+
+  it.each(
+    [
+      ["source", createCailClient, CailError],
+      ["dist", createDistCailClient, DistCailError],
+    ].flatMap(([build, createClient, ErrorClass]) =>
+      (["redirect", "quota", "non-retryable"] as const).flatMap((branch) =>
+        (["resolve", "reject", "never-settle", "throw"] as const).map(
+          (cancelMode) =>
+            [build, branch, cancelMode, createClient, ErrorClass] as const,
+        ),
+      ),
+    ),
+  )(
+    "%s %s outcome is prompt and unchanged when discard cancellation must %s",
+    async (_build, branch, cancelMode, createClient, ErrorClass) => {
+      const makeClient = createClient as typeof createCailClient;
+      const ExpectedError = ErrorClass as typeof CailError;
+      const upstream =
+        branch === "redirect"
+          ? new Response("redirect body", {
+              status: 302,
+              headers: { location: "https://evil.example/" },
+            })
+          : branch === "quota"
+            ? envelope(429, {
+                error: "quota_exceeded",
+                message: "over budget",
+              })
+            : envelope(
+                502,
+                {
+                  error: "upstream_service_error",
+                  message: "outcome uncertain",
+                },
+                { "x-should-retry": "false" },
+              );
+      const pendingCleanup = responseWithCancelFailure(upstream, cancelMode);
+      const fetchImpl = vi.fn(async () => pendingCleanup.response) as typeof fetch;
+      const client = makeClient({
+        baseUrl: BASE,
+        app: APP,
+        fetchImpl,
+        maxRetries: 0,
+      });
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => {
+        unhandled.push(reason);
+      };
+      const diagnosticFailure = new Error("PRIVATE_DIAGNOSTIC_SENTINEL");
+      let diagnosticCalls = 0;
+      const consoleError = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {
+          diagnosticCalls += 1;
+          throw diagnosticFailure;
+        });
+      process.on("unhandledRejection", onUnhandled);
+
+      let error: unknown;
+      try {
+        const operation =
+          branch === "redirect"
+            ? client.call("/v1/models", { method: "GET" }, KEY)
+            : client.chatFetch(KEY)(CHAT_URL, sdkInit);
+        error = await rejectionWithin(operation);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+        consoleError.mockRestore();
+      }
+
+      expect(error).toBeInstanceOf(ExpectedError);
+      expect(error).toMatchObject(
+        branch === "redirect"
+          ? { code: "unexpected_redirect", status: 302 }
+          : branch === "quota"
+            ? { code: "quota_exceeded", status: 429 }
+            : { code: "upstream_service_error", status: 502 },
+      );
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(pendingCleanup.cancelCalls()).toBe(1);
+      expect(diagnosticCalls).toBe(0);
+      expect(unhandled).toEqual([]);
+      expect(JSON.stringify(error)).not.toContain("PRIVATE_CANCEL_SENTINEL");
+      expect(JSON.stringify(error)).not.toContain(
+        "PRIVATE_DIAGNOSTIC_SENTINEL",
+      );
+    },
+  );
+});
 
 // ── Credential forwarding (I1) ────────────────────────────────────────────
 
