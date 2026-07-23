@@ -152,6 +152,7 @@ export class CailError extends Error {
     extras: Record<string, unknown> = {},
     type = "unknown_error",
     param: string | null = null,
+    cause?: unknown,
   ) {
     super(message);
     this.name = "CailError";
@@ -160,6 +161,7 @@ export class CailError extends Error {
     this.param = param;
     this.status = status;
     this.extras = extras;
+    if (cause !== undefined) this.cause = cause;
     // Preserve prototype chain when compiled to ES5-ish targets / bundlers.
     Object.setPrototypeOf(this, CailError.prototype);
   }
@@ -509,6 +511,18 @@ function existingMetadataHeader(
 function isRetriableNetworkError(err: unknown): boolean {
   // A thrown error from fetch (DNS/connect/reset) — not a CailError we minted.
   return !(err instanceof CailError);
+}
+
+function networkError(cause: unknown): CailError {
+  return new CailError(
+    "network_error",
+    "Network request to the CAIL backbone failed.",
+    0,
+    {},
+    "unknown_error",
+    null,
+    cause,
+  );
 }
 
 /**
@@ -1803,11 +1817,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
         // contract the caller has reviewed.
         if (internal?.rawMode === "return") throw err;
         if (internal?.rawMode === "throw") {
-          throw new CailError(
-            "network_error",
-            "Network request to the CAIL backbone failed.",
-            0,
-          );
+          throw networkError(err);
         }
         // Network/transport error (I5): retry up to maxRetries, else throw.
         if (
@@ -1822,11 +1832,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
           attempt++;
           continue;
         }
-        throw new CailError(
-          "network_error",
-          "Network request to the CAIL backbone failed.",
-          0,
-        );
+        throw networkError(err);
       }
 
       // A redirect from the proxy is never a valid model-proxy response. With

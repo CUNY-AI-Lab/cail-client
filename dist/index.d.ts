@@ -123,7 +123,7 @@ export declare class CailError extends Error {
     readonly status: number;
     /** CAIL-specific fields from `error.cail`, plus advisory response metadata. */
     readonly extras: Record<string, unknown>;
-    constructor(code: string, message: string, status: number, extras?: Record<string, unknown>, type?: string, param?: string | null);
+    constructor(code: string, message: string, status: number, extras?: Record<string, unknown>, type?: string, param?: string | null, cause?: unknown);
 }
 export interface CailClientOptions {
     /** Trusted CAIL_API_BASE. HTTPS is required and trailing slashes are normalized. */

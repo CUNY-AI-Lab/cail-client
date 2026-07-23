@@ -624,8 +624,9 @@ describe("I5 — retry policy", () => {
   it("network errors never copy transport messages containing credentials or bodies", async () => {
     const secret = "sk-cail-do-not-echo";
     const body = "private request body";
+    const cause = new TypeError(`failed with ${secret} and ${body}`);
     const fetchImpl = (async () => {
-      throw new TypeError(`failed with ${secret} and ${body}`);
+      throw cause;
     }) as typeof fetch;
     const client = createCailClient({
       baseUrl: BASE,
@@ -638,6 +639,39 @@ describe("I5 — retry policy", () => {
     expect(err.code).toBe("network_error");
     expect(err.message).not.toContain(secret);
     expect(err.message).not.toContain(body);
+    expect(err.extras).toEqual({});
+    expect(err.cause).toBe(cause);
+  });
+
+  it("preserves the final transport cause after retries are exhausted", async () => {
+    const causes = [
+      new TypeError("first transport failure"),
+      new TypeError("second transport failure"),
+      new TypeError("final transport failure"),
+    ];
+    let attempt = 0;
+    const fetchImpl = (async () => {
+      throw causes[attempt++]!;
+    }) as typeof fetch;
+    const client = createCailClient({
+      baseUrl: BASE,
+      app: APP,
+      fetchImpl,
+      maxRetries: 2,
+    });
+
+    const err = await client
+      .call("/v1/models", { method: "GET" }, KEY)
+      .catch((error) => error);
+
+    expect(attempt).toBe(3);
+    expect(err).toMatchObject({
+      code: "network_error",
+      status: 0,
+      message: "Network request to the CAIL backbone failed.",
+      extras: {},
+    });
+    expect(err.cause).toBe(causes.at(-1));
   });
 
   it("V22 400 → NO retry (throws immediately)", async () => {
@@ -1438,13 +1472,27 @@ describe("chatFetch — SDK adapter", () => {
     expect(resp.status).toBe(500);
     expect(rec.captured).toHaveLength(1);
 
-    const netErr = wired({ networkError: true });
-    await expect(
-      netErr.client.chatFetch(KEY)(
+    const cause = new TypeError("raw chat transport failure");
+    const netErr = createCailClient({
+      baseUrl: BASE,
+      app: APP,
+      fetchImpl: (async () => {
+        throw cause;
+      }) as typeof fetch,
+    });
+    const error = await netErr
+      .chatFetch(KEY)(
         CHAT_URL,
         sdkInit({ model: "@cf/m/x", messages: [] }),
-      ),
-    ).rejects.toMatchObject({ code: "network_error", status: 0 });
+      )
+      .catch((caught) => caught);
+    expect(error).toMatchObject({
+      code: "network_error",
+      status: 0,
+      message: "Network request to the CAIL backbone failed.",
+      extras: {},
+    });
+    expect(error.cause).toBe(cause);
 
     const rawNetErr = wired({ networkError: true });
     await expect(

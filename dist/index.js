@@ -61,7 +61,7 @@ export class CailError extends Error {
     status;
     /** CAIL-specific fields from `error.cail`, plus advisory response metadata. */
     extras;
-    constructor(code, message, status, extras = {}, type = "unknown_error", param = null) {
+    constructor(code, message, status, extras = {}, type = "unknown_error", param = null, cause) {
         super(message);
         this.name = "CailError";
         this.code = code;
@@ -69,6 +69,8 @@ export class CailError extends Error {
         this.param = param;
         this.status = status;
         this.extras = extras;
+        if (cause !== undefined)
+            this.cause = cause;
         // Preserve prototype chain when compiled to ES5-ish targets / bundlers.
         Object.setPrototypeOf(this, CailError.prototype);
     }
@@ -189,6 +191,9 @@ function existingMetadataHeader(record) {
 function isRetriableNetworkError(err) {
     // A thrown error from fetch (DNS/connect/reset) — not a CailError we minted.
     return !(err instanceof CailError);
+}
+function networkError(cause) {
+    return new CailError("network_error", "Network request to the CAIL backbone failed.", 0, {}, "unknown_error", null, cause);
 }
 /**
  * HTTP methods that are idempotent by definition (RFC 9110 §9.2.2 / MDN):
@@ -1138,7 +1143,7 @@ export function createCailClient(opts) {
                 if (internal?.rawMode === "return")
                     throw err;
                 if (internal?.rawMode === "throw") {
-                    throw new CailError("network_error", "Network request to the CAIL backbone failed.", 0);
+                    throw networkError(err);
                 }
                 // Network/transport error (I5): retry up to maxRetries, else throw.
                 if ((internal?.modelRun !== true ||
@@ -1151,7 +1156,7 @@ export function createCailClient(opts) {
                     attempt++;
                     continue;
                 }
-                throw new CailError("network_error", "Network request to the CAIL backbone failed.", 0);
+                throw networkError(err);
             }
             // A redirect from the proxy is never a valid model-proxy response. With
             // redirect:"manual" the platform surfaces it as an opaque redirect
