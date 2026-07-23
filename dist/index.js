@@ -45,6 +45,7 @@ import { outboundCorrelationHeaders, TRACEPARENT_HEADER, TRACESTATE_HEADER, CAIL
  * {@link CailCallOptions} and letting the client attach the headers).
  */
 export { correlationFromHeaders, outboundCorrelationHeaders, TRACEPARENT_HEADER, TRACESTATE_HEADER, CAIL_REQUEST_ID_HEADER, } from "@cuny-ai-lab/cail-log";
+const liveCailErrors = new WeakSet();
 /**
  * A typed CAIL backbone error. Thrown by `call()` on any non-2xx response (I4)
  * and on retry exhaustion (I5). `message` is the envelope's `message` verbatim
@@ -73,7 +74,11 @@ export class CailError extends Error {
             this.cause = cause;
         // Preserve prototype chain when compiled to ES5-ish targets / bundlers.
         Object.setPrototypeOf(this, CailError.prototype);
+        liveCailErrors.add(this);
     }
+}
+function isLiveCailError(value) {
+    return liveCailErrors.has(value);
 }
 const APP_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const RESERVED_METADATA_KEYS = new Set(["user_id", "app", "via"]);
@@ -190,7 +195,20 @@ function existingMetadataHeader(record) {
 }
 function isRetriableNetworkError(err) {
     // A thrown error from fetch (DNS/connect/reset) — not a CailError we minted.
-    return !(err instanceof CailError);
+    if ((typeof err !== "object" && typeof err !== "function") ||
+        err === null) {
+        return true;
+    }
+    if (isLiveCailError(err))
+        return false;
+    try {
+        Object.getPrototypeOf(err);
+        return true;
+    }
+    catch {
+        // If a rejected value cannot be classified safely, do not replay it.
+        return false;
+    }
 }
 function networkError(cause) {
     return new CailError("network_error", "Network request to the CAIL backbone failed.", 0, {}, "unknown_error", null, cause);
@@ -510,10 +528,86 @@ function parseJsonLayer(value) {
         return value;
     }
 }
+function safeDataProperty(value, key) {
+    try {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        return descriptor !== undefined && "value" in descriptor
+            ? { found: true, value: descriptor.value }
+            : { found: false };
+    }
+    catch {
+        return { found: false };
+    }
+}
+function safeDataValue(value, key) {
+    const property = safeDataProperty(value, key);
+    return property.found ? property.value : undefined;
+}
+function safeDataEntries(value) {
+    try {
+        const descriptors = Object.getOwnPropertyDescriptors(value);
+        const entries = [];
+        for (const [key, descriptor] of Object.entries(descriptors)) {
+            if (descriptor.enumerable && "value" in descriptor) {
+                entries.push([key, descriptor.value]);
+            }
+        }
+        return entries;
+    }
+    catch {
+        return null;
+    }
+}
+function safeRecordCopy(value) {
+    if (value === null || typeof value !== "object")
+        return null;
+    try {
+        if (Array.isArray(value))
+            return null;
+    }
+    catch {
+        return null;
+    }
+    const entries = safeDataEntries(value);
+    if (entries === null)
+        return null;
+    const copy = {};
+    for (const [key, item] of entries) {
+        Object.defineProperty(copy, key, {
+            configurable: true,
+            enumerable: true,
+            value: item,
+            writable: true,
+        });
+    }
+    return copy;
+}
+function safeArrayValues(value) {
+    try {
+        if (!Array.isArray(value))
+            return [];
+    }
+    catch {
+        return [];
+    }
+    const length = safeDataValue(value, "length");
+    if (typeof length !== "number" ||
+        !Number.isSafeInteger(length) ||
+        length < 0) {
+        return [];
+    }
+    const values = [];
+    for (let index = 0; index < Math.min(length, EXTRACT_MAX_LAYERS); index++) {
+        const item = safeDataProperty(value, String(index));
+        if (item.found)
+            values.push(item.value);
+    }
+    return values;
+}
 /** A plausible HTTP status carried on an SDK wrapper (`statusCode` / `status`). */
 function wrapperStatus(record) {
     for (const key of ["statusCode", "status"]) {
-        const value = record[key];
+        const value = safeDataValue(record, key);
         if (typeof value === "number" &&
             Number.isInteger(value) &&
             value >= 100 &&
@@ -530,18 +624,22 @@ function wrapperStatus(record) {
  * {@link parseCailError}.
  */
 function cailErrorFromEnvelope(error, status) {
-    const cail = error["cail"];
-    const param = error["param"];
-    const validCail = cail === undefined || isRecord(cail);
+    const message = safeDataValue(error, "message");
+    const type = safeDataValue(error, "type");
+    const code = safeDataValue(error, "code");
+    const cail = safeDataProperty(error, "cail");
+    const param = safeDataValue(error, "param");
+    const cailExtras = cail.found ? safeRecordCopy(cail.value) : {};
+    const validCail = !cail.found || cailExtras !== null;
     const validParam = param === null || typeof param === "string";
-    if (typeof error["message"] !== "string" ||
-        typeof error["type"] !== "string" ||
-        typeof error["code"] !== "string" ||
+    if (typeof message !== "string" ||
+        typeof type !== "string" ||
+        typeof code !== "string" ||
         !validParam ||
         !validCail) {
         return null;
     }
-    return new CailError(error["code"], error["message"], status, cail === undefined ? {} : { ...cail }, error["type"], typeof param === "string" ? param : null);
+    return new CailError(code, message, status, cailExtras ?? {}, type, typeof param === "string" ? param : null);
 }
 /**
  * Recognize a bare CailError-shaped record — a `CailError` that lost its
@@ -551,54 +649,66 @@ function cailErrorFromEnvelope(error, status) {
  * platform errors (e.g. Node's `code: "ECONNRESET"`) never match.
  */
 function cailErrorFromBareShape(record, fallbackStatus) {
-    if (typeof record["code"] !== "string" ||
-        typeof record["message"] !== "string") {
+    const code = safeDataValue(record, "code");
+    const message = safeDataValue(record, "message");
+    if (typeof code !== "string" ||
+        typeof message !== "string") {
         return null;
     }
-    const hasMarker = record["name"] === "CailError" ||
-        isRecord(record["cail"]) ||
-        isRecord(record["extras"]) ||
-        (typeof record["status"] === "number" &&
-            typeof record["type"] === "string");
+    const name = safeDataValue(record, "name");
+    const cail = safeRecordCopy(safeDataValue(record, "cail"));
+    const extrasRecord = safeRecordCopy(safeDataValue(record, "extras"));
+    const recordStatus = safeDataValue(record, "status");
+    const recordType = safeDataValue(record, "type");
+    const hasMarker = name === "CailError" ||
+        cail !== null ||
+        extrasRecord !== null ||
+        (typeof recordStatus === "number" && typeof recordType === "string");
     if (!hasMarker)
         return null;
-    const status = typeof record["status"] === "number" &&
-        Number.isInteger(record["status"]) &&
-        record["status"] >= 0
-        ? record["status"]
+    const status = typeof recordStatus === "number" &&
+        Number.isInteger(recordStatus) &&
+        recordStatus >= 0
+        ? recordStatus
         : fallbackStatus;
     const extras = {
-        ...(isRecord(record["cail"]) ? record["cail"] : {}),
-        ...(isRecord(record["extras"]) ? record["extras"] : {}),
+        ...(cail ?? {}),
+        ...(extrasRecord ?? {}),
     };
-    const param = record["param"];
-    return new CailError(record["code"], record["message"], status, extras, typeof record["type"] === "string" ? record["type"] : "unknown_error", typeof param === "string" ? param : null);
+    const param = safeDataValue(record, "param");
+    return new CailError(code, message, status, extras, typeof recordType === "string" ? recordType : "unknown_error", typeof param === "string" ? param : null);
 }
 /** Safety cap on layers visited by {@link extractCailError} (adversarial inputs). */
 const EXTRACT_MAX_LAYERS = 256;
 function responseMetadataFromWrapper(record) {
-    const raw = record["responseHeaders"];
-    if (!((typeof Headers !== "undefined" && raw instanceof Headers) ||
-        isRecord(raw))) {
+    const raw = safeDataValue(record, "responseHeaders");
+    if (raw === null || typeof raw !== "object")
         return {};
-    }
-    let headers;
-    try {
-        headers = raw instanceof Headers ? raw : new Headers(Object.fromEntries(Object.entries(raw).filter((entry) => typeof entry[1] === "string")));
-    }
-    catch {
-        return {};
-    }
+    const plainEntries = safeDataEntries(raw);
+    const header = (name) => {
+        if (typeof Headers !== "undefined") {
+            try {
+                return Headers.prototype.get.call(raw, name);
+            }
+            catch {
+                // Plain records are handled through their own data descriptors.
+            }
+        }
+        if (plainEntries === null)
+            return null;
+        const match = plainEntries.find(([key, value]) => key.toLowerCase() === name && typeof value === "string");
+        return typeof match?.[1] === "string" ? match[1] : null;
+    };
     const metadata = {};
-    const requestId = validRequestId(headers.get("x-request-id"));
+    const requestId = validRequestId(header("x-request-id"));
     if (requestId !== null)
         metadata.request_id = requestId;
-    const retry = headers.get("x-should-retry")?.trim().toLowerCase();
+    const retry = header("x-should-retry")?.trim().toLowerCase();
     if (retry === "true")
         metadata.should_retry = true;
     if (retry === "false")
         metadata.should_retry = false;
-    const retryAfter = validRetryAfter(headers.get("retry-after"));
+    const retryAfter = validRetryAfter(header("retry-after"));
     if (retryAfter !== null)
         metadata.retry_after = retryAfter;
     return metadata;
@@ -607,9 +717,32 @@ function mergeResponseMetadata(outer, inner) {
     return { ...outer, ...inner };
 }
 function attachResponseMetadata(error, metadata) {
+    const extrasProperty = safeDataProperty(error, "extras");
+    if (!extrasProperty.found ||
+        extrasProperty.value === null ||
+        typeof extrasProperty.value !== "object") {
+        return error;
+    }
+    const extras = extrasProperty.value;
     for (const [key, value] of Object.entries(metadata)) {
-        if (!(key in error.extras))
-            error.extras[key] = value;
+        try {
+            if (Object.getOwnPropertyDescriptor(extras, key) !== undefined) {
+                continue;
+            }
+            if (!Object.isExtensible(extras))
+                return error;
+            if (!Reflect.defineProperty(extras, key, {
+                configurable: true,
+                enumerable: true,
+                value,
+                writable: true,
+            })) {
+                return error;
+            }
+        }
+        catch {
+            return error;
+        }
     }
     return error;
 }
@@ -650,42 +783,44 @@ export function extractCailError(value) {
     while (layers.length > 0 && visited < EXTRACT_MAX_LAYERS) {
         const entry = layers.shift();
         const layer = parseJsonLayer(entry.value);
-        if (!layer || typeof layer !== "object" || seen.has(layer)) {
+        if (layer === null ||
+            (typeof layer !== "object" && typeof layer !== "function") ||
+            seen.has(layer)) {
             continue;
         }
         seen.add(layer);
         visited++;
-        if (layer instanceof CailError) {
+        if (isLiveCailError(layer)) {
             return attachResponseMetadata(layer, entry.metadata);
         }
-        const record = layer;
-        const status = wrapperStatus(record) ?? entry.status;
-        const metadata = mergeResponseMetadata(entry.metadata, responseMetadataFromWrapper(record));
-        if (isRecord(record["error"])) {
-            const fromEnvelope = cailErrorFromEnvelope(record["error"], status);
+        const status = wrapperStatus(layer) ?? entry.status;
+        const metadata = mergeResponseMetadata(entry.metadata, responseMetadataFromWrapper(layer));
+        const nestedError = safeDataValue(layer, "error");
+        if (nestedError !== null &&
+            (typeof nestedError === "object" ||
+                typeof nestedError === "function")) {
+            const fromEnvelope = cailErrorFromEnvelope(nestedError, status);
             if (fromEnvelope !== null) {
                 return attachResponseMetadata(fromEnvelope, metadata);
             }
         }
-        const fromBareShape = cailErrorFromBareShape(record, status);
+        const fromBareShape = cailErrorFromBareShape(layer, status);
         if (fromBareShape !== null) {
             return attachResponseMetadata(fromBareShape, metadata);
         }
         for (const nested of [
-            record["responseBody"],
-            record["cause"],
-            record["error"],
-            record["data"],
-            record["lastError"],
+            safeDataValue(layer, "responseBody"),
+            safeDataValue(layer, "cause"),
+            nestedError,
+            safeDataValue(layer, "data"),
+            safeDataValue(layer, "lastError"),
         ]) {
             if (nested !== undefined) {
                 layers.push({ value: nested, status, metadata });
             }
         }
-        if (Array.isArray(record["errors"])) {
-            for (const nested of record["errors"]) {
-                layers.push({ value: nested, status, metadata });
-            }
+        for (const nested of safeArrayValues(safeDataValue(layer, "errors"))) {
+            layers.push({ value: nested, status, metadata });
         }
     }
     return null;

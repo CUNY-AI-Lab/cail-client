@@ -11,6 +11,7 @@ import {
   type CailCredential,
 } from "../src/index.js";
 import {
+  CailError as DistCailError,
   createCailClient as createDistCailClient,
   parseCailError as parseDistCailError,
 } from "../dist/index.js";
@@ -950,6 +951,90 @@ describe("I5 — retry policy", () => {
     });
     expect(err.cause).toBe(causes.at(-1));
   });
+
+  it.each([
+    ["source", createCailClient, CailError],
+    ["dist", createDistCailClient, DistCailError],
+  ] as const)(
+    "%s contains hostile transport reflection without retrying or losing the cause",
+    async (_build, createClient, ErrorClass) => {
+      const reflectionFailure = new Error("PRIVATE_REFLECTION_SENTINEL");
+      let reflectionCalls = 0;
+      const cause = new Proxy(
+        {},
+        {
+          getPrototypeOf() {
+            reflectionCalls++;
+            throw reflectionFailure;
+          },
+        },
+      );
+      const fetchImpl = vi.fn(async () => {
+        throw cause;
+      }) as typeof fetch;
+      const client = createClient({
+        baseUrl: BASE,
+        app: APP,
+        fetchImpl,
+        maxRetries: 2,
+      });
+
+      const err = await client
+        .call("/v1/models", {}, KEY)
+        .catch((error) => error);
+
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(reflectionCalls).toBe(1);
+      expect(err).toBeInstanceOf(ErrorClass);
+      expect(err).toMatchObject({
+        code: "network_error",
+        status: 0,
+        message: "Network request to the CAIL backbone failed.",
+        extras: {},
+      });
+      expect(err.cause).toBe(cause);
+      expect(err).not.toBe(reflectionFailure);
+      expect(err.message).not.toContain(reflectionFailure.message);
+      expect(JSON.stringify(err.extras)).not.toContain(
+        reflectionFailure.message,
+      );
+    },
+  );
+
+  it.each([
+    ["source", createCailClient, CailError],
+    ["dist", createDistCailClient, DistCailError],
+  ] as const)(
+    "%s does not retry a genuine module CailError rejected by transport",
+    async (_build, createClient, ErrorClass) => {
+      const cause = new ErrorClass(
+        "already_typed",
+        "Private typed transport failure.",
+        0,
+      );
+      const fetchImpl = vi.fn(async () => {
+        throw cause;
+      }) as typeof fetch;
+      const client = createClient({
+        baseUrl: BASE,
+        app: APP,
+        fetchImpl,
+        maxRetries: 2,
+      });
+
+      const err = await client
+        .call("/v1/models", {}, KEY)
+        .catch((error) => error);
+
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(err).toMatchObject({
+        code: "network_error",
+        message: "Network request to the CAIL backbone failed.",
+      });
+      expect(err.cause).toBe(cause);
+      expect(err.message).not.toContain(cause.message);
+    },
+  );
 
   it("V22 400 → NO retry (throws immediately)", async () => {
     const { rec, client } = wired([
