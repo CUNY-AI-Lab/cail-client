@@ -97,6 +97,12 @@ const MAX_METADATA_KEYS = 8;
 const MAX_METADATA_STRING_LEN = 128;
 const CREDENTIAL_CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/;
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// Request correlation ids accept v4 or RFC 9562 v7, matching cail-log. Reusing
+// the v4-only pattern silently dropped a v7 id from CailError.extras.request_id
+// and response metadata — losing client-visible correlation on exactly the
+// requests the contract newly blesses. Idempotency keys stay v4: that is their
+// owning contract's requirement, so they keep UUID_V4_RE.
+const REQUEST_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CAIL_SUBJECT_RE = /^cail-[0-9a-f]{32}$/;
 const APP_SUBJECT_RE = /^app-[0-9a-f]{32}$/;
 const QUOTA_STATE_VALUES = new Set(["ok", "stale"]);
@@ -352,7 +358,7 @@ function validRequestId(value) {
         return null;
     const trimmed = value.trim();
     return trimmed.length <= MAX_RESPONSE_METADATA_CHARS &&
-        UUID_V4_RE.test(trimmed)
+        REQUEST_ID_RE.test(trimmed)
         ? trimmed.toLowerCase()
         : null;
 }
