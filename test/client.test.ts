@@ -724,6 +724,44 @@ describe("I4 — error envelope → typed error, message verbatim", () => {
     });
   });
 
+  it.each([
+    ["source", parseCailError],
+    ["dist", parseDistCailError],
+  ] as const)(
+    "%s preserves only exact lowercase UUIDv4/v7 response correlation",
+    async (_build, parseError) => {
+      const v4 = "abcdefab-cdef-4abc-8def-abcdefabcdef";
+      const v7 = "017f22e2-79b0-7cc3-98c4-dc0c0c07398f";
+
+      for (const requestId of [v4, v7]) {
+        const error = await parseError(
+          envelope(
+            400,
+            { error: "bad_request", message: "bad" },
+            { "x-request-id": requestId },
+          ),
+        );
+        expect(error.extras.request_id).toBe(requestId);
+      }
+
+      for (const requestId of [
+        v4.toUpperCase(),
+        v7.toUpperCase(),
+        "017f22e2-79b0-6cc3-98c4-dc0c0c07398f",
+        "017f22e2-79b0-7cc3-c8c4-dc0c0c07398f",
+      ]) {
+        const error = await parseError(
+          envelope(
+            400,
+            { error: "bad_request", message: "bad" },
+            { "x-request-id": requestId },
+          ),
+        );
+        expect(error.extras).not.toHaveProperty("request_id");
+      }
+    },
+  );
+
   it("preserves a response-body read failure as the private cause", async () => {
     const cause = new Error("PRIVATE_BODY_READ_SENTINEL");
     const response = new Response(

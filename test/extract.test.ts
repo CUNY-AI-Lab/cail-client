@@ -246,6 +246,32 @@ describe("extractCailError", () => {
     });
   });
 
+  it.each(implementations)(
+    "%s does not trim or lowercase noncanonical response request ids",
+    (_build, extract) => {
+      const body = JSON.stringify({
+        error: {
+          message: "Try again later.",
+          type: "server_error",
+          param: null,
+          code: "models_unavailable",
+        },
+      });
+      for (const requestId of [
+        " abcdefab-cdef-4abc-8def-abcdefabcdef ",
+        "abcdefab-cdef-4abc-8def-abcdefabcdef".toUpperCase(),
+        "017F22E2-79B0-7CC3-98C4-DC0C0C07398F",
+      ]) {
+        const extracted = extract({
+          statusCode: 503,
+          responseHeaders: { "x-request-id": requestId },
+          responseBody: body,
+        });
+        expect(extracted?.extras).not.toHaveProperty("request_id");
+      }
+    },
+  );
+
   it("adds validated wrapper retry metadata to a nested live CailError", () => {
     const live = new CailError(
       "upstream_service_error",

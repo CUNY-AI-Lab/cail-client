@@ -102,7 +102,7 @@ const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9
 // and response metadata — losing client-visible correlation on exactly the
 // requests the contract newly blesses. Idempotency keys stay v4: that is their
 // owning contract's requirement, so they keep UUID_V4_RE.
-const REQUEST_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const REQUEST_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CAIL_SUBJECT_RE = /^cail-[0-9a-f]{32}$/;
 const APP_SUBJECT_RE = /^app-[0-9a-f]{32}$/;
 const QUOTA_STATE_VALUES = new Set(["ok", "stale"]);
@@ -356,10 +356,9 @@ function addResponseMetadataExtras(response, extras) {
 function validRequestId(value) {
     if (value === null)
         return null;
-    const trimmed = value.trim();
-    return trimmed.length <= MAX_RESPONSE_METADATA_CHARS &&
-        REQUEST_ID_RE.test(trimmed)
-        ? trimmed.toLowerCase()
+    return value.length <= MAX_RESPONSE_METADATA_CHARS &&
+        REQUEST_ID_RE.test(value)
+        ? value
         : null;
 }
 function validRetryAfter(value) {
