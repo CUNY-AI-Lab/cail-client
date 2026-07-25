@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "package": {
+    "name": "@cuny-ai-lab/cail-log",
+    "version": "0.6.0"
+  },
+  "registry": {
+    "url": "https://npm.pkg.github.com",
+    "package_version_id": 1066236862,
+    "published_at": "2026-07-25T16:40:58Z"
+  },
+  "artifact": {
+    "bytes": 50269,
+    "sha256": "8689422456eb4b7c672538ba91efb7606e9287df473a99a91ee2a60b5f9ba215"
+  },
+  "independent_review": {
+    "accepted_commit": "cb6ffc0cfd4cb544639cbf288ff6eb24c7027e98",
+    "accepted_tree": "618c4bdfae0effadbe23cfd6c4dfb1fcf6440697"
+  },
+  "provenance": {
+    "published_from_commit": "7d093f4c4d28367056c5124889a283d5ff9908c4",
+    "note": "Published by the cail-log repository's own release workflow, authenticated by that workflow's GITHUB_TOKEN with packages: write. The publishing commit is three workflow-only commits above the independently reviewed commit recorded above. The package `files` allowlist excludes .github, so both trees produce a byte-identical artifact: the SHA-1 the publishing run reported, 632c8a3d74bc4709c23b9636b73471c1291d7679, matches a local pack of the reviewed source, and that pack's SHA-256 is the accepted digest recorded here."
+  }
+}

@@ -15,14 +15,15 @@
   },
   "registry": {
     "url": "https://npm.pkg.github.com",
-    "state": "unavailable",
+    "state": "available",
     "observed_versions": [
-      "0.4.0"
+      "0.4.0",
+      "0.6.0"
     ],
     "required_receipt": "vendor/cail-log-0.6.0.registry-receipt.json"
   },
   "client_publication": {
-    "state": "blocked",
-    "reason": "The configured registry does not yet contain the reviewed cail-log 0.6.0 artifact."
+    "state": "unblocked",
+    "reason": "The configured registry contains the reviewed cail-log 0.6.0 artifact; see vendor/cail-log-0.6.0.registry-receipt.json."
   }
 }

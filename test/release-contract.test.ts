@@ -1,6 +1,12 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -233,36 +239,47 @@ describe("release and CI boundary", () => {
     }
   });
 
-  it("fails publication closed until a reviewed registry artifact exists", () => {
+  it("fails publication closed when the reviewed registry receipt is absent", () => {
+    // cail-log 0.6.0 is now in the registry, so the receipt exists and the
+    // authority no longer describes publication as blocked. Fail-closed is
+    // therefore proved by removing the receipt rather than by this repository
+    // happening not to have one — which also lets the passing direction be
+    // asserted, so the gate is tested both ways instead of only one.
     expect(cailLogAuthority.registry).toEqual({
       url: "https://npm.pkg.github.com",
-      state: "unavailable",
-      observed_versions: ["0.4.0"],
+      state: "available",
+      observed_versions: ["0.4.0", "0.6.0"],
       required_receipt: "vendor/cail-log-0.6.0.registry-receipt.json",
     });
-    expect(cailLogAuthority.client_publication.state).toBe("blocked");
-    expect(
-      existsSync(
-        new URL(
-          "../vendor/cail-log-0.6.0.registry-receipt.json",
-          import.meta.url,
-        ),
-      ),
-    ).toBe(false);
-    const publicationGate = spawnSync(
-      "bun",
-      ["run", "check:publication-authority"],
-      {
+    expect(cailLogAuthority.client_publication.state).toBe("unblocked");
+
+    const receiptPath = new URL(
+      "../vendor/cail-log-0.6.0.registry-receipt.json",
+      import.meta.url,
+    );
+    expect(existsSync(receiptPath)).toBe(true);
+
+    const runGate = () =>
+      spawnSync("bun", ["run", "check:publication-authority"], {
         cwd: root,
         encoding: "utf8",
-      },
-    );
-    expect(publicationGate.status).toBe(1);
-    const output =
-      (publicationGate.stdout ?? "") + (publicationGate.stderr ?? "");
-    expect(output).toContain("cail-client publication blocked");
-    expect(output).toContain("immutable registry receipt is required");
-    expect(output).not.toContain(RETRACTED_CAIL_LOG_SHA256);
+      });
+
+    expect(runGate().status).toBe(0);
+
+    const saved = readFileSync(receiptPath);
+    rmSync(receiptPath);
+    try {
+      const blocked = runGate();
+      expect(blocked.status).toBe(1);
+      const output = (blocked.stdout ?? "") + (blocked.stderr ?? "");
+      expect(output).toContain("cail-client publication blocked");
+      expect(output).toContain("immutable registry receipt is required");
+      expect(output).not.toContain(RETRACTED_CAIL_LOG_SHA256);
+    } finally {
+      writeFileSync(receiptPath, saved);
+    }
+    expect(runGate().status).toBe(0);
   });
 
   it("rejects forged or inconsistent registry receipts", () => {
