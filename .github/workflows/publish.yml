@@ -35,12 +35,14 @@ jobs:
           # ${NODE_AUTH_TOKEN}, relying on npm to expand it. bun reads that file
           # but does not expand the placeholder, so it reaches the registry
           # unauthenticated and exits 1 straight after packing without saying why.
-          # Kept in one step under one env block so exactly one step sees the token.
+          # Written to $HOME, not the worktree: prepublishOnly runs check:clean,
+          # which refuses to publish from a dirty tree, and an .npmrc in the
+          # working directory is exactly that. Kept in one step under one env
+          # block so exactly one step ever sees the token.
           unset NPM_CONFIG_USERCONFIG
-          printf '@cuny-ai-lab:registry=https://npm.pkg.github.com\n' > .npmrc
-          printf '//npm.pkg.github.com/:_authToken=%s\n' "$NODE_AUTH_TOKEN" >> .npmrc
-          chmod 600 .npmrc
+          printf '@cuny-ai-lab:registry=https://npm.pkg.github.com\n' > "$HOME/.npmrc"
+          printf '//npm.pkg.github.com/:_authToken=%s\n' "$NODE_AUTH_TOKEN" >> "$HOME/.npmrc"
+          chmod 600 "$HOME/.npmrc"
           bun publish
-          rm -f .npmrc
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
