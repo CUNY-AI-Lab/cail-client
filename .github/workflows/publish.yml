@@ -35,7 +35,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish to GitHub Packages
-        run: bun publish
+        run: |
+          bun run prepublishOnly
+          PUBLISH_DIRECTORY="$(mktemp -d)"
+          trap 'rm -rf "$PUBLISH_DIRECTORY"' EXIT
+          PACKAGE_VERSION="$(bun -p "require('./package.json').version")"
+          PACKAGE_TARBALL="$PUBLISH_DIRECTORY/cuny-ai-lab-cail-client-${PACKAGE_VERSION}.tgz"
+          bun pm pack --destination "$PUBLISH_DIRECTORY" --ignore-scripts
+          cp package.json "$PUBLISH_DIRECTORY/package.json"
+          (
+            cd "$PUBLISH_DIRECTORY"
+            bun publish \
+              --registry=https://npm.pkg.github.com \
+              "$PACKAGE_TARBALL"
+          )
         env:
           CAIL_REGISTRY_VERSIONS_FILE: ${{ runner.temp }}/cail-client-package-versions.json
           NPM_CONFIG_TOKEN: ${{ secrets.GITHUB_TOKEN }}

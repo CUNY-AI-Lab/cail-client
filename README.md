@@ -68,10 +68,14 @@ release. An exact source archive may run `bun install --frozen-lockfile` and
 `bun run check` without Git history. Publication is intentionally limited to a
 clean Git checkout and fails closed with a clear error in archive mode.
 
-Set `NPM_CONFIG_TOKEN` to a classic GitHub PAT with `write:packages`, verify with
-`bun publish --dry-run`, and release with `bun publish`. Both commands invoke
-the complete `prepublishOnly` gate before any registry mutation. GitHub Actions
-may instead use a repository `GITHUB_TOKEN` with `packages: write`.
+Set `NPM_CONFIG_TOKEN` to a classic GitHub PAT with `write:packages` and verify
+the package with `bun publish --dry-run`. The release workflow runs the complete
+`prepublishOnly` gate, packs without repeating lifecycle scripts, and runs
+`bun publish` on that reviewed tarball from a clean temporary directory with
+the GitHub Packages registry supplied explicitly. Keeping the publish process
+outside the source directory prevents the source checkout's registry-only
+`.npmrc` from replacing Bun's native workflow token. GitHub Actions uses the
+repository `GITHUB_TOKEN` with `packages: write`.
 
 ## Construct a client
 

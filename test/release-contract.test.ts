@@ -1,13 +1,19 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  copyFileSync,
   existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { resolve } from "node:path";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { isValidRegistryReceipt } from "../scripts/check-publication-authority.js";
@@ -35,6 +41,10 @@ const publishWorkflow = readFileSync(
 );
 const readme = readFileSync(
   new URL("../README.md", import.meta.url),
+  "utf8",
+);
+const npmrc = readFileSync(
+  new URL("../.npmrc", import.meta.url),
   "utf8",
 );
 const cailLogArtifact = fileURLToPath(
@@ -111,6 +121,168 @@ const CAIL_LOG_FILES = [
   "package/src/sensitive.ts",
 ].sort();
 
+async function actualLoopbackPublishAuthorization(): Promise<string[]> {
+  const temporary = mkdtempSync(
+    join(tmpdir(), "cail-client-publish-auth-"),
+  );
+  const packageDirectory = join(temporary, "package");
+  const publishDirectory = join(temporary, "publish");
+  const homeDirectory = join(temporary, "home");
+  const requests: string[] = [];
+  const server = createServer((request, response) => {
+    requests.push(request.headers.authorization ?? "");
+    request.resume();
+    request.on("end", () => {
+      response.writeHead(201, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+    });
+  });
+  try {
+    await new Promise<void>((resolveListen, rejectListen) => {
+      server.once("error", rejectListen);
+      server.listen(0, "127.0.0.1", () => resolveListen());
+    });
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("loopback publish server did not expose a TCP port");
+    }
+    const registry = `http://127.0.0.1:${address.port}`;
+    mkdirSync(packageDirectory);
+    mkdirSync(publishDirectory);
+    writeFileSync(
+      join(packageDirectory, "package.json"),
+      `${JSON.stringify(
+        {
+          name: "@cuny-ai-lab/cail-client-publish-auth-probe",
+          version: "0.0.0",
+          type: "module",
+          files: ["index.js"],
+          publishConfig: {
+            access: "restricted",
+            registry,
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    writeFileSync(join(packageDirectory, "index.js"), "export {};\n");
+    writeFileSync(
+      join(packageDirectory, ".npmrc"),
+      [`@cuny-ai-lab:registry=${registry}`, ""].join("\n"),
+    );
+    // Keep every alternate credential/configuration input absent. The
+    // workflow's Bun-native token must be the only possible authority.
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: homeDirectory,
+      XDG_CONFIG_HOME: join(temporary, "xdg"),
+      NPM_CONFIG_TOKEN: "workflow-loopback-token",
+      NO_PROXY: "127.0.0.1,localhost",
+      no_proxy: "127.0.0.1,localhost",
+    };
+    for (const name of [
+      "NODE_AUTH_TOKEN",
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "NPM_TOKEN",
+      "npm_token",
+      "npm_config_token",
+      "NPM_CONFIG_USERCONFIG",
+      "npm_config_userconfig",
+      "NPM_CONFIG_REGISTRY",
+      "npm_config_registry",
+      "BUN_CONFIG_TOKEN",
+      "BUN_CONFIG_REGISTRY",
+    ]) {
+      delete environment[name];
+    }
+
+    const packed = spawnSync(
+      "bun",
+      [
+        "pm",
+        "pack",
+        "--destination",
+        publishDirectory,
+        "--ignore-scripts",
+      ],
+      {
+        cwd: packageDirectory,
+        encoding: "utf8",
+        env: environment,
+      },
+    );
+    expect(
+      packed.status,
+      `${packed.stdout ?? ""}${packed.stderr ?? ""}`,
+    ).toBe(0);
+    const tarballs = readdirSync(publishDirectory).filter((entry) =>
+      entry.endsWith(".tgz"),
+    );
+    expect(tarballs).toHaveLength(1);
+    copyFileSync(
+      join(packageDirectory, "package.json"),
+      join(publishDirectory, "package.json"),
+    );
+
+    const result = await new Promise<{
+      status: number | null;
+      stdout: string;
+      stderr: string;
+    }>((resolvePublish, rejectPublish) => {
+      const child = spawn(
+        "bun",
+        [
+          "publish",
+          "--registry",
+          registry,
+          join(publishDirectory, tarballs[0]!),
+        ],
+        {
+          cwd: publishDirectory,
+          env: environment,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+      child.stderr.on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+      const timeout = setTimeout(() => {
+        child.kill("SIGKILL");
+      }, 30_000);
+      child.once("error", (error) => {
+        clearTimeout(timeout);
+        rejectPublish(error);
+      });
+      child.once("close", (status) => {
+        clearTimeout(timeout);
+        resolvePublish({ status, stdout, stderr });
+      });
+    });
+    expect(
+      result.status,
+      `${result.stdout}${result.stderr}`,
+    ).toBe(0);
+    return requests;
+  } finally {
+    await new Promise<void>((resolveClose, rejectClose) => {
+      server.close((error) => {
+        if (error) rejectClose(error);
+        else resolveClose();
+      });
+    });
+    rmSync(temporary, { recursive: true, force: true });
+  }
+}
+
 describe("release and CI boundary", () => {
   it("pins reviewed CI actions and prevents checkout credential persistence", () => {
     expect(ci).toContain(`uses: ${CHECKOUT_ACTION}`);
@@ -135,6 +307,17 @@ describe("release and CI boundary", () => {
     expect(publishWorkflow).not.toContain("NODE_AUTH_TOKEN");
     expect(publishWorkflow).not.toContain("NPM_CONFIG_USERCONFIG");
     expect(publishWorkflow).not.toMatch(/>\s*\.npmrc/);
+    expect(publishWorkflow).toContain("bun run prepublishOnly");
+    expect(publishWorkflow).toContain(
+      'bun pm pack --destination "$PUBLISH_DIRECTORY" --ignore-scripts',
+    );
+    expect(publishWorkflow).toContain(
+      'cp package.json "$PUBLISH_DIRECTORY/package.json"',
+    );
+    expect(publishWorkflow).toContain('cd "$PUBLISH_DIRECTORY"');
+    expect(publishWorkflow).toContain(
+      "--registry=https://npm.pkg.github.com",
+    );
 
     const result = spawnSync(
       "bun",
@@ -153,6 +336,16 @@ describe("release and CI boundary", () => {
     expect(result.status).toBe(0);
     expect(output).toContain(
       "+ @cuny-ai-lab/cail-client@2.0.1 (dry-run)",
+    );
+  });
+
+  it("sends the workflow token in an actual hermetic publish request", async () => {
+    const authorizations = await actualLoopbackPublishAuthorization();
+    expect(authorizations).toEqual([
+      "Bearer workflow-loopback-token",
+    ]);
+    expect(npmrc).toBe(
+      "@cuny-ai-lab:registry=https://npm.pkg.github.com\n",
     );
   });
 
