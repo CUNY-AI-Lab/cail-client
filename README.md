@@ -44,7 +44,7 @@ consuming repository's `.npmrc`. Never place an actual token in this file:
 //npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
 ```
 
-Pin an exact release, for example `"@cuny-ai-lab/cail-client": "2.0.0"`, then
+Pin an exact release, for example `"@cuny-ai-lab/cail-client": "2.0.1"`, then
 run `bun install` with `NODE_AUTH_TOKEN` set in the environment to a GitHub
 PAT that has `read:packages` (supplied by a user-level `~/.npmrc` or a CI
 secret). Bun 1.3.5 reads the registry and token interpolation from `.npmrc`;
@@ -57,15 +57,18 @@ That source-only artifact is excluded from the packed client; the published
 client truthfully depends on exact `@cuny-ai-lab/cail-log` 0.6.0 from GitHub
 Packages.
 
-Client publication remains blocked until the registry contains the reviewed
-cail-log artifact and a separate reviewed immutable registry receipt is added;
-changing the source-authority status alone cannot authorize publication.
-An exact source archive may run `bun install --frozen-lockfile` and
+The reviewed cail-log artifact and its immutable registry receipt are present,
+so that dependency gate is satisfied. Client 2.0.0 is already present in the
+registry; this source uses the unoccupied 2.0.1 successor and does not claim it
+has been published. The checked-in release authority records the 2.0.0 package
+version identity and the dated observation that 2.0.1 was absent. The publish
+workflow repeats that read-only registry query immediately before publishing.
+Changing either local authority file alone cannot authorize a conflicting
+release. An exact source archive may run `bun install --frozen-lockfile` and
 `bun run check` without Git history. Publication is intentionally limited to a
 clean Git checkout and fails closed with a clear error in archive mode.
 
-After the registry receipt is independently accepted, set `NODE_AUTH_TOKEN` to
-a classic GitHub PAT with `write:packages`, verify with
+Set `NODE_AUTH_TOKEN` to a classic GitHub PAT with `write:packages`, verify with
 `bun publish --dry-run`, and release with `bun publish`. Both commands invoke
 the complete `prepublishOnly` gate before any registry mutation. GitHub Actions
 may instead use a repository `GITHUB_TOKEN` with `packages: write`.
@@ -433,12 +436,13 @@ bun run check
 ```
 
 `bun run check` scans tracked text formatting, typechecks, runs every test,
-dry-runs the package contents, rebuilds, and rejects tracked or untracked
+dry-runs the package contents without lifecycle scripts, rebuilds in a
+temporary directory, and rejects tracked or untracked
 `dist/` drift. `prepublishOnly` runs this same package-local gate; it does not
-depend on a sibling repository. CI installs from the frozen lockfile with the
-GitHub Packages token scoped only to that step, then runs the gate without
-registry credentials. The recording fetch tests assert outgoing URLs, methods,
-headers, credentials, signals, and bodies at the wire boundary.
+depend on a sibling repository. CI installs from the frozen lockfile and the
+reviewed vendored Log artifact without registry credentials. The recording
+fetch tests assert outgoing URLs, methods, headers, credentials, signals, and
+bodies at the wire boundary.
 
 `contract/model-gateway-v1.json` is the packaged catalog/quota/error
 conformance fixture. The broader `test/quota-wire-vectors.json` suite is

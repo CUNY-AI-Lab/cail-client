@@ -1,6 +1,6 @@
 {
   "name": "@cuny-ai-lab/cail-client",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "The CAIL model-proxy API client for CUNY applications: a pure Web-standard fetch wrapper that owns the credential, header, error, and retry contract. Runs unchanged in the browser, Cloudflare Workers, and Node >=20.",
   "type": "module",
   "license": "MIT",
@@ -31,16 +31,18 @@
   "packageManager": "bun@1.3.5",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "check": "bun run check:format && bun run typecheck && bun run test && bun run check:dist && bun run check:package",
+    "check": "bun run check:format && bun run typecheck && bun run test && bun run check:dist && bun run check:package && bun run check:release-authority",
     "check:dist": "bun scripts/check-dist.ts",
     "check:format": "bun scripts/check-format.ts",
     "check:package": "bun pm pack --dry-run --ignore-scripts",
     "check:clean": "bun scripts/check-clean.ts",
     "check:publication-authority": "bun scripts/check-publication-authority.ts",
+    "check:release-authority": "bun scripts/check-client-release-authority.ts",
+    "check:release-live": "bun scripts/check-client-release-authority.ts --live",
     "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "bun run check && bun run check:clean && bun run check:publication-authority",
+    "prepublishOnly": "bun run check && bun run check:clean && bun run check:publication-authority && bun run check:release-live",
     "prepare": "bun run build"
   },
   "dependencies": {

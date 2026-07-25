@@ -340,7 +340,8 @@ describe("release and CI boundary", () => {
   it("documents Bun-native GitHub Packages publishing only", () => {
     expect(readme).toContain("bun publish --dry-run");
     expect(readme).toContain("bun publish");
-    expect(readme).toContain("publication remains blocked");
+    expect(readme).toContain("does not claim it");
+    expect(readme).toContain("2.0.1 was absent");
     expect(readme).not.toContain("npm publish");
     expect(readme).not.toMatch(/Bun .*cannot authenticate/i);
   });

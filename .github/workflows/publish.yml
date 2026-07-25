@@ -29,6 +29,16 @@ jobs:
         run: |
           PACKAGE_VERSION="$(bun -p "require('./package.json').version")"
           test "v${PACKAGE_VERSION}" = "${GITHUB_REF_NAME}"
+      - name: Verify immutable registry version authority
+        run: |
+          gh api \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            '/orgs/CUNY-AI-Lab/packages/npm/cail-client/versions?per_page=100&state=active' \
+            > "$RUNNER_TEMP/cail-client-package-versions.json"
+          CAIL_REGISTRY_VERSIONS_FILE="$RUNNER_TEMP/cail-client-package-versions.json" \
+            bun run check:release-live
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish to GitHub Packages
         run: |
           # setup-node points NPM_CONFIG_USERCONFIG at an .npmrc holding a literal
@@ -45,4 +55,5 @@ jobs:
           chmod 600 "$HOME/.npmrc"
           bun publish
         env:
+          CAIL_REGISTRY_VERSIONS_FILE: ${{ runner.temp }}/cail-client-package-versions.json
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
