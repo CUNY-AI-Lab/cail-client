@@ -29,6 +29,10 @@ const ci = readFileSync(
   new URL("../.github/workflows/ci.yml", import.meta.url),
   "utf8",
 );
+const publishWorkflow = readFileSync(
+  new URL("../.github/workflows/publish.yml", import.meta.url),
+  "utf8",
+);
 const readme = readFileSync(
   new URL("../README.md", import.meta.url),
   "utf8",
@@ -119,7 +123,37 @@ describe("release and CI boundary", () => {
   it("uses a depth-one checkout and needs no package credential", () => {
     expect(ci).toMatch(/fetch-depth:\s*1/);
     expect(ci).not.toContain("NODE_AUTH_TOKEN");
-    expect(ci).toContain("run: bun install --frozen-lockfile");
+    expect(ci).toContain(
+      "run: bun install --frozen-lockfile --ignore-scripts",
+    );
+  });
+
+  it("uses Bun's native publish token without checkout credential writes", () => {
+    expect(publishWorkflow).toContain(
+      "NPM_CONFIG_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+    );
+    expect(publishWorkflow).not.toContain("NODE_AUTH_TOKEN");
+    expect(publishWorkflow).not.toContain("NPM_CONFIG_USERCONFIG");
+    expect(publishWorkflow).not.toMatch(/>\s*\.npmrc/);
+
+    const result = spawnSync(
+      "bun",
+      ["publish", "--dry-run", "--ignore-scripts"],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          NPM_CONFIG_TOKEN: "workflow-dry-run-placeholder",
+        },
+        timeout: 120_000,
+      },
+    );
+    const output = (result.stdout ?? "") + (result.stderr ?? "");
+    expect(result.status).toBe(0);
+    expect(output).toContain(
+      "+ @cuny-ai-lab/cail-client@2.0.1 (dry-run)",
+    );
   });
 
   it("runs hermetic local gates before checking publication authority", () => {

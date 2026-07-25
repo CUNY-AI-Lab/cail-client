@@ -5,7 +5,6 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,18 +36,32 @@ describe("committed dist authority", () => {
           },
         });
         expect(existsSync(join(checkout, ".git"))).toBe(false);
-        symlinkSync(
-          resolve(root, "node_modules"),
-          join(checkout, "node_modules"),
-          "dir",
-        );
-
         const distPath = join(checkout, "dist/index.js");
         const drift = Buffer.concat([
           readFileSync(distPath),
           Buffer.from("\n// harmless stale-dist sentinel\n"),
         ]);
         writeFileSync(distPath, drift);
+
+        const install = spawnSync(
+          "bun",
+          [
+            "install",
+            "--frozen-lockfile",
+            "--offline",
+            "--ignore-scripts",
+          ],
+          {
+            cwd: checkout,
+            encoding: "utf8",
+            timeout: 120_000,
+          },
+        );
+        const installOutput =
+          (install.stdout ?? "") + (install.stderr ?? "");
+        expect(install.status).toBe(0);
+        expect(installOutput).not.toContain("bun run build");
+        expect(readFileSync(distPath).equals(drift)).toBe(true);
 
         const result = spawnSync("bun", ["run", "check"], {
           cwd: checkout,

@@ -68,7 +68,7 @@ release. An exact source archive may run `bun install --frozen-lockfile` and
 `bun run check` without Git history. Publication is intentionally limited to a
 clean Git checkout and fails closed with a clear error in archive mode.
 
-Set `NODE_AUTH_TOKEN` to a classic GitHub PAT with `write:packages`, verify with
+Set `NPM_CONFIG_TOKEN` to a classic GitHub PAT with `write:packages`, verify with
 `bun publish --dry-run`, and release with `bun publish`. Both commands invoke
 the complete `prepublishOnly` gate before any registry mutation. GitHub Actions
 may instead use a repository `GITHUB_TOKEN` with `packages: write`.
