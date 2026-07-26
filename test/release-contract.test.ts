@@ -319,6 +319,19 @@ describe("release and CI boundary", () => {
       "--registry=https://npm.pkg.github.com",
     );
 
+    // Hermetic: bun resolves publish credentials from an npmrc, so without one
+    // this asserted whatever the developer happened to be logged into and failed
+    // in CI, where the install step removes .npmrc before the tests run. A
+    // placeholder credential in a temporary userconfig keeps the dry run
+    // self-contained; the token actually reaching the registry is proven
+    // separately by the loopback publish test below.
+    const publishHome = mkdtempSync(join(tmpdir(), "cail-client-publish-"));
+    writeFileSync(
+      join(publishHome, ".npmrc"),
+      "@cuny-ai-lab:registry=https://npm.pkg.github.com\n" +
+        "//npm.pkg.github.com/:_authToken=workflow-dry-run-placeholder\n",
+      { mode: 0o600 },
+    );
     const result = spawnSync(
       "bun",
       ["publish", "--dry-run", "--ignore-scripts"],
@@ -328,6 +341,9 @@ describe("release and CI boundary", () => {
         env: {
           ...process.env,
           NPM_CONFIG_TOKEN: "workflow-dry-run-placeholder",
+          // bun does not read NPM_CONFIG_USERCONFIG; $HOME/.npmrc is what it
+          // consults, which is why the publish workflow writes there too.
+          HOME: publishHome,
         },
         timeout: 120_000,
       },
