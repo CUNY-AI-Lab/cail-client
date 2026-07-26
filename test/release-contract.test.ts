@@ -319,42 +319,21 @@ describe("release and CI boundary", () => {
       "--registry=https://npm.pkg.github.com",
     );
 
-    // Hermetic: bun resolves publish credentials from an npmrc, so without one
-    // this asserted whatever the developer happened to be logged into and failed
-    // in CI, where the install step removes .npmrc before the tests run. A
-    // placeholder credential in a temporary userconfig keeps the dry run
-    // self-contained; the token actually reaching the registry is proven
-    // separately by the loopback publish test below.
-    const publishHome = mkdtempSync(join(tmpdir(), "cail-client-publish-"));
-    writeFileSync(
-      join(publishHome, ".npmrc"),
-      "@cuny-ai-lab:registry=https://npm.pkg.github.com\n" +
-        "//npm.pkg.github.com/:_authToken=workflow-dry-run-placeholder\n",
-      { mode: 0o600 },
-    );
+    // Assert the packing the workflow actually performs. `bun pm pack` is the
+    // step before publish and needs no credentials, so this cannot depend on
+    // whoever is logged in. An earlier version asserted `bun publish --dry-run`
+    // exited 0, which passed locally off an ambient ~/.npmrc and failed on every
+    // runner with "missing authentication". That the workflow's token really
+    // reaches the registry is proven by the loopback publish test below, which
+    // is the assertion that actually covers authentication.
     const result = spawnSync(
       "bun",
-      ["publish", "--dry-run", "--ignore-scripts"],
-      {
-        cwd: root,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          NPM_CONFIG_TOKEN: "workflow-dry-run-placeholder",
-          // bun does not read NPM_CONFIG_USERCONFIG; $HOME/.npmrc is what it
-          // consults, which is why the publish workflow writes there too.
-          HOME: publishHome,
-        },
-        timeout: 120_000,
-      },
+      ["pm", "pack", "--dry-run", "--ignore-scripts"],
+      { cwd: root, encoding: "utf8", timeout: 120_000 },
     );
     const output = (result.stdout ?? "") + (result.stderr ?? "");
-    // Carry the tool's own output into the assertion. A bare status check here
-    // reported "expected 1 to be 0" with no cause, which cost two blind fixes.
     expect(`${result.status}\n${output}`).toBe(`0\n${output}`);
-    expect(output).toContain(
-      "+ @cuny-ai-lab/cail-client@2.0.1 (dry-run)",
-    );
+    expect(output).toContain("cuny-ai-lab-cail-client-2.0.1.tgz");
   });
 
   it("sends the workflow token in an actual hermetic publish request", async () => {
