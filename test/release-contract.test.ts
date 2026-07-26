@@ -349,7 +349,9 @@ describe("release and CI boundary", () => {
       },
     );
     const output = (result.stdout ?? "") + (result.stderr ?? "");
-    expect(result.status).toBe(0);
+    // Carry the tool's own output into the assertion. A bare status check here
+    // reported "expected 1 to be 0" with no cause, which cost two blind fixes.
+    expect(`${result.status}\n${output}`).toBe(`0\n${output}`);
     expect(output).toContain(
       "+ @cuny-ai-lab/cail-client@2.0.1 (dry-run)",
     );
