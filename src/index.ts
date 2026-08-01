@@ -764,6 +764,10 @@ function discardResponseBody(response: Response): void {
   beginBestEffortCleanup(() => response.body!.cancel());
 }
 
+type DefaultReaderResult<T> = Awaited<
+  ReturnType<ReadableStreamDefaultReader<T>["read"]>
+>;
+
 /**
  * Read one chunk while observing the caller's signal independently of the
  * transport. A stream reader is not required to know about an AbortSignal;
@@ -775,10 +779,10 @@ function readWithSignal<T>(
   reader: ReadableStreamDefaultReader<T>,
   signal: AbortSignal | null | undefined,
   cancelOnAbort: (reason: unknown) => void,
-): Promise<ReadableStreamReadResult<T>> {
+): Promise<DefaultReaderResult<T>> {
   if (signal === null || signal === undefined) return reader.read();
 
-  const rejectAborted = (): Promise<ReadableStreamReadResult<T>> => {
+  const rejectAborted = (): Promise<DefaultReaderResult<T>> => {
     const reason = abortReason(signal);
     cancelOnAbort(reason);
     return Promise.reject(reason);
@@ -786,7 +790,7 @@ function readWithSignal<T>(
 
   if (signal.aborted) return rejectAborted();
 
-  return new Promise<ReadableStreamReadResult<T>>((resolve, reject) => {
+  return new Promise<DefaultReaderResult<T>>((resolve, reject) => {
     let settled = false;
     let onAbort: (() => void) | undefined;
     const removeAbortListener = () => {
@@ -820,7 +824,7 @@ function readWithSignal<T>(
       return;
     }
 
-    let readPromise: Promise<ReadableStreamReadResult<T>>;
+    let readPromise: ReturnType<ReadableStreamDefaultReader<T>["read"]>;
     try {
       readPromise = reader.read();
     } catch (error) {
