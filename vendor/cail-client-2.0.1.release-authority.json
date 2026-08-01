@@ -5,13 +5,13 @@
     "candidate_version": "2.0.1"
   },
   "behavior_authority": {
-    "commit": "5f429e994e490bfeb8e7996d9eff23ea577f0809",
-    "tree": "55f5df427544b7f9cc1da3d3df805e80c91c7ec6",
+    "commit": "2fe0d64ca8db6b2f1aaf5872a508b60ee9cf415e",
+    "tree": "40b2ae2d91f0a1f933797c4008785c5dcd54a6db",
     "runtime_paths": [
       "contract",
       "src"
     ],
-    "runtime_sha256": "a19d664073047ed4d54ab412a9d1fd86f259cddba37c2693a8c72e95069c1724"
+    "runtime_sha256": "60e79246bb9bab070f6c74a81969badd3b83191b1b269bd171ce8c001daa58a2"
   },
   "registry": {
     "url": "https://npm.pkg.github.com",

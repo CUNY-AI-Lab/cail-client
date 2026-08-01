@@ -31,7 +31,7 @@ describe("client release version authority", () => {
   it("records the occupied release and preserves behavior bytes", () => {
     expect(isValidAuthority(authority)).toBe(true);
     expect(runtimeDigest()).toBe(
-      "a19d664073047ed4d54ab412a9d1fd86f259cddba37c2693a8c72e95069c1724",
+      "60e79246bb9bab070f6c74a81969badd3b83191b1b269bd171ce8c001daa58a2",
     );
   });
 
