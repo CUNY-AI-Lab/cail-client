@@ -2011,6 +2011,141 @@ describe("parseCailError (standalone)", () => {
   );
 });
 
+describe("bounded error-body reader cancellation", () => {
+  it.each([
+    ["source", parseCailError],
+    ["dist", parseDistCailError],
+  ] as const)(
+    "%s aborts a stalled reader independently of transport cancellation",
+    async (_build, parseError) => {
+      const controller = new AbortController();
+      const reason = new DOMException("stalled body stopped", "AbortError");
+      let cancelCalls = 0;
+      let cancelReason: unknown;
+      const body = new ReadableStream<Uint8Array>({
+        // Never enqueue or close: reader.read() remains pending until the
+        // parser observes the caller's signal and cancels this reader.
+        start() {},
+        cancel(reason) {
+          cancelCalls += 1;
+          cancelReason = reason;
+        },
+      });
+
+      const pending = parseError(
+        new Response(body, { status: 400 }),
+        controller.signal,
+      );
+      controller.abort(reason);
+
+      await expect(pending).rejects.toBe(reason);
+      expect(cancelCalls).toBe(1);
+      expect(cancelReason).toBe(reason);
+      expect(body.locked).toBe(false);
+    },
+  );
+
+  it.each([
+    ["source", parseCailError],
+    ["dist", parseDistCailError],
+  ] as const)(
+    "%s keeps the abort primary when reader cancellation rejects",
+    async (_build, parseError) => {
+      const controller = new AbortController();
+      const reason = new DOMException("cleanup failed", "AbortError");
+      const cleanupFailure = new Error("PRIVATE_CANCEL_FAILURE");
+      let cancelCalls = 0;
+      const body = new ReadableStream<Uint8Array>({
+        start() {},
+        cancel() {
+          cancelCalls += 1;
+          return Promise.reject(cleanupFailure);
+        },
+      });
+
+      const unhandled: unknown[] = [];
+      const onUnhandled = (error: unknown) => unhandled.push(error);
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        const pending = parseError(
+          new Response(body, { status: 400 }),
+          controller.signal,
+        );
+        controller.abort(reason);
+
+        await expect(pending).rejects.toBe(reason);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
+
+      expect(cancelCalls).toBe(1);
+      expect(body.locked).toBe(false);
+      expect(unhandled).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["source", parseCailError],
+    ["dist", parseDistCailError],
+  ] as const)(
+    "%s preserves a read failure when cleanup also fails",
+    async (_build, parseError) => {
+      const readFailure = new TypeError("PRIVATE_READ_FAILURE");
+      const cleanupFailure = new Error("PRIVATE_CANCEL_FAILURE");
+      const body = new ReadableStream<Uint8Array>({
+        start(streamController) {
+          streamController.error(readFailure);
+        },
+        cancel() {
+          return Promise.reject(cleanupFailure);
+        },
+      });
+
+      const error = await parseError(
+        new Response(body, { status: 400 }),
+      ).catch((cause) => cause);
+
+      expect(error).toMatchObject({
+        code: "unknown_error",
+        status: 400,
+      });
+      expect(error.cause).toBe(readFailure);
+      expect(body.locked).toBe(false);
+    },
+  );
+
+  it.each([
+    ["source", parseCailError],
+    ["dist", parseDistCailError],
+  ] as const)(
+    "%s cancels exactly once on the 64 KiB byte limit and releases the lock",
+    async (_build, parseError) => {
+      const oversized = new Uint8Array(64 * 1024 + 1);
+      let cancelCalls = 0;
+      const body = new ReadableStream<Uint8Array>({
+        start(streamController) {
+          streamController.enqueue(oversized);
+        },
+        cancel() {
+          cancelCalls += 1;
+        },
+      });
+
+      const error = await parseError(
+        new Response(body, { status: 400 }),
+      ).catch((cause) => cause);
+
+      expect(error).toMatchObject({
+        code: "unknown_error",
+        status: 400,
+      });
+      expect(cancelCalls).toBe(1);
+      expect(body.locked).toBe(false);
+    },
+  );
+});
+
 // ── I8 extension — canonical chat completions ─────────────────────────────
 
 describe("I8 — canonical chat completions", () => {

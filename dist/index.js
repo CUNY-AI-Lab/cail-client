@@ -417,6 +417,72 @@ function discardResponseBody(response) {
         return;
     beginBestEffortCleanup(() => response.body.cancel());
 }
+/**
+ * Read one chunk while observing the caller's signal independently of the
+ * transport. A stream reader is not required to know about an AbortSignal;
+ * the parser therefore races its pending read against a one-shot abort
+ * listener. The read's rejection handler remains attached after an abort so a
+ * late platform rejection cannot become an unhandled rejection.
+ */
+function readWithSignal(reader, signal, cancelOnAbort) {
+    if (signal === null || signal === undefined)
+        return reader.read();
+    const rejectAborted = () => {
+        const reason = abortReason(signal);
+        cancelOnAbort(reason);
+        return Promise.reject(reason);
+    };
+    if (signal.aborted)
+        return rejectAborted();
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        let onAbort;
+        const removeAbortListener = () => {
+            if (onAbort === undefined)
+                return;
+            signal.removeEventListener("abort", onAbort);
+            onAbort = undefined;
+        };
+        const settle = (callback) => {
+            if (settled)
+                return;
+            settled = true;
+            removeAbortListener();
+            callback();
+        };
+        onAbort = () => {
+            if (settled)
+                return;
+            const reason = abortReason(signal);
+            settle(() => {
+                cancelOnAbort(reason);
+                reject(reason);
+            });
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        // A hostile/custom signal can transition between the initial check and
+        // listener registration. Native AbortSignal abort() is synchronous, but
+        // checking again keeps this helper deterministic for Web-compatible test
+        // doubles too.
+        if (signal.aborted) {
+            onAbort();
+            return;
+        }
+        let readPromise;
+        try {
+            readPromise = reader.read();
+        }
+        catch (error) {
+            settle(() => reject(error));
+            return;
+        }
+        // Keep both handlers attached even when abort wins. Streams are allowed to
+        // reject a pending read after cancellation/release; observing that late
+        // settlement prevents an unhandled rejection without changing the primary
+        // abort error.
+        void Promise.resolve(readPromise).then((result) => settle(() => resolve(result)), (error) => settle(() => reject(error)));
+    });
+}
 async function responseTextWithinLimit(response, maxBytes = MAX_ERROR_BODY_BYTES, signal) {
     if (signal?.aborted)
         throw abortReason(signal);
@@ -442,27 +508,39 @@ async function responseTextWithinLimit(response, maxBytes = MAX_ERROR_BODY_BYTES
     const decoder = new TextDecoder("utf-8", { fatal: true });
     let total = 0;
     let text = "";
+    let cancellationStarted = false;
+    const cancelReader = (reason) => {
+        if (cancellationStarted)
+            return;
+        cancellationStarted = true;
+        beginBestEffortCleanup(() => reason === undefined ? reader.cancel() : reader.cancel(reason));
+    };
     try {
         for (;;) {
-            const chunk = await reader.read();
+            const chunk = await readWithSignal(reader, signal, cancelReader);
             if (chunk.done) {
                 if (signal?.aborted)
                     throw abortReason(signal);
                 text += decoder.decode();
                 return text;
             }
+            if (signal?.aborted)
+                throw abortReason(signal);
             total += chunk.value.byteLength;
             if (total > maxBytes) {
-                beginBestEffortCleanup(() => reader.cancel());
+                cancelReader();
                 return null;
             }
             text += decoder.decode(chunk.value, { stream: true });
         }
     }
     catch (err) {
-        beginBestEffortCleanup(() => reader.cancel());
-        if (signal?.aborted)
-            throw abortReason(signal);
+        if (signal?.aborted) {
+            const reason = abortReason(signal);
+            cancelReader(reason);
+            throw reason;
+        }
+        cancelReader();
         throw err;
     }
     finally {
