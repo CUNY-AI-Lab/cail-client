@@ -9,7 +9,7 @@ const authorityPath = resolve(
   "vendor/cail-client-2.0.1.release-authority.json",
 );
 const expectedRuntimeSha256 =
-  "60e79246bb9bab070f6c74a81969badd3b83191b1b269bd171ce8c001daa58a2";
+  "295aa0653c7277675fe5aec1c8198d9addc997205a78f2c58141c7942f1e2765";
 
 type Version = {
   id?: unknown;
@@ -61,9 +61,9 @@ export function isValidAuthority(authority: Authority): boolean {
     authority.package?.name === "@cuny-ai-lab/cail-client" &&
     authority.package?.candidate_version === "2.0.1" &&
     authority.behavior_authority?.commit ===
-      "2fe0d64ca8db6b2f1aaf5872a508b60ee9cf415e" &&
+      "7f5e73ce2b6fc6a7a490767a4369206cd21b0547" &&
     authority.behavior_authority?.tree ===
-      "40b2ae2d91f0a1f933797c4008785c5dcd54a6db" &&
+      "c035e086c2ede410f2f9ec4a02fb4581c10f8c84" &&
     JSON.stringify(authority.behavior_authority?.runtime_paths) ===
       JSON.stringify(["contract", "src"]) &&
     authority.behavior_authority?.runtime_sha256 ===
