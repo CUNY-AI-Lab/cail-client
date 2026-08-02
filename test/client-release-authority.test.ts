@@ -7,6 +7,10 @@ import {
   isValidLiveVersions,
   runtimeDigest,
 } from "../scripts/check-client-release-authority.js";
+import {
+  type GithubJson,
+  verifyReleaseRef,
+} from "../scripts/check-client-release-ref.js";
 
 const historicalAuthority = JSON.parse(
   readFileSync(
@@ -37,6 +41,38 @@ const publishWorkflow = readFileSync(
   "utf8",
 );
 
+const currentHead = "a".repeat(40);
+const oldHead = "b".repeat(40);
+
+function releaseApi(tagSha: string, branchSha: string): GithubJson {
+  const responses = new Map<string, unknown>([
+    [
+      "/repos/CUNY-AI-Lab/cail-client",
+      { default_branch: "main" },
+    ],
+    [
+      "/repos/CUNY-AI-Lab/cail-client/git/ref/heads/main",
+      { object: { sha: branchSha, type: "commit" } },
+    ],
+    [
+      "/repos/CUNY-AI-Lab/cail-client/git/ref/tags/v3.0.0",
+      { object: { sha: tagSha, type: "commit" } },
+    ],
+  ]);
+  return async (path) => {
+    if (!responses.has(path)) throw new Error(`unexpected API path: ${path}`);
+    return responses.get(path);
+  };
+}
+
+const exactReleaseContext = {
+  packageVersion: "3.0.0",
+  repository: "CUNY-AI-Lab/cail-client",
+  refType: "tag",
+  refName: "v3.0.0",
+  sha: currentHead,
+} as const;
+
 describe("client release version authority", () => {
   it("preserves historical authority and binds the current behavior bytes", () => {
     expect(isValidHistoricalAuthority(historicalAuthority)).toBe(true);
@@ -65,6 +101,40 @@ describe("client release version authority", () => {
     expect(publishWorkflow).toContain(
       'CAIL_REGISTRY_VERSIONS_FILE="$RUNNER_TEMP/cail-client-package-versions.json"',
     );
+    expect(publishWorkflow).toContain("bun run check:release-ref");
+    expect(publishWorkflow.match(/bun run check:release-ref/gu)).toHaveLength(2);
+    expect(publishWorkflow).toContain("timeout-minutes: 15");
+    expect(publishWorkflow).toContain("GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}");
+    expect(publishWorkflow).toContain("GITHUB_REF_TYPE: ${{ github.ref_type }}");
+    expect(publishWorkflow).toContain("GITHUB_REF_NAME: ${{ github.ref_name }}");
+    expect(publishWorkflow).toContain("GITHUB_SHA: ${{ github.sha }}");
+    expect(publishWorkflow).not.toContain(
+      "Verify release tag matches package version",
+    );
+  });
+
+  it("rejects a version-matching tag that is not the live default-branch head", async () => {
+    await expect(
+      verifyReleaseRef(
+        { ...exactReleaseContext, sha: oldHead },
+        releaseApi(oldHead, currentHead),
+      ),
+    ).rejects.toThrow("live default-branch head");
+  });
+
+  it("rejects an old-head GITHUB_SHA even when the tag name is correct", async () => {
+    await expect(
+      verifyReleaseRef(
+        { ...exactReleaseContext, sha: oldHead },
+        releaseApi(currentHead, currentHead),
+      ),
+    ).rejects.toThrow("GITHUB_SHA is not the commit named by the release tag");
+  });
+
+  it("accepts an exact tag, tag commit, and live default-branch head", async () => {
+    await expect(
+      verifyReleaseRef(exactReleaseContext, releaseApi(currentHead, currentHead)),
+    ).resolves.toBeUndefined();
   });
 
   it("rejects forged local authority", () => {

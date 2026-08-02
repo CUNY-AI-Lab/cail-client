@@ -38,6 +38,7 @@
     "check:clean": "bun scripts/check-clean.ts",
     "check:publication-authority": "bun scripts/check-publication-authority.ts",
     "check:release-authority": "bun scripts/check-client-release-authority.ts",
+    "check:release-ref": "bun scripts/check-client-release-ref.ts",
     "check:release-live": "bun scripts/check-client-release-authority.ts --live",
     "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",

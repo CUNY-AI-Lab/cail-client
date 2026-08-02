@@ -562,10 +562,12 @@ describe("release and CI boundary", () => {
   });
 
   it("documents Bun-native GitHub Packages publishing only", () => {
-    expect(readme).toContain("bun publish --dry-run");
+    expect(readme).toContain("bun pm pack --dry-run --ignore-scripts");
     expect(readme).toContain("bun publish");
     expect(readme).toContain("unreleased 3.0.0 candidate");
     expect(readme).toContain("not evidence that the registry version is available");
+    expect(readme).toMatch(/fresh complete registry\s+snapshot/u);
+    expect(readme).toContain("cannot be repaired retroactively");
     expect(readme).not.toContain("npm publish");
     expect(readme).not.toMatch(/Bun .*cannot authenticate/i);
   });

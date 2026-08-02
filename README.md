@@ -72,14 +72,26 @@ archive may run `bun install --frozen-lockfile` and `bun run check` without Git
 history. Publication is intentionally limited to a clean Git checkout and
 fails closed with a clear error in archive mode.
 
-Set `NPM_CONFIG_TOKEN` to a classic GitHub PAT with `write:packages` and verify
-the package with `bun publish --dry-run`. The release workflow runs the complete
-`prepublishOnly` gate, packs without repeating lifecycle scripts, and runs
-`bun publish` on that reviewed tarball from a clean temporary directory with
-the GitHub Packages registry supplied explicitly. Keeping the publish process
-outside the source directory prevents the source checkout's registry-only
-`.npmrc` from replacing Bun's native workflow token. GitHub Actions uses the
-repository `GITHUB_TOKEN` with `packages: write`.
+The release workflow also requires the published release tag to be exactly
+`v<package version>` and to resolve, through the read-only GitHub contents API,
+to the live default-branch head. It compares that commit with `GITHUB_SHA`, so a
+version-matching tag made from an older commit cannot publish. Until the correct
+3.0.0 occupies its immutable registry version, an already-created tag that
+points at an older workflow cannot be repaired retroactively: exact tag
+creation, protected-tag configuration, and any temporary workflow disable are
+approval-bound remote-control steps.
+
+For a credential-free package-only check, run
+`bun pm pack --dry-run --ignore-scripts`; this verifies the packed contents
+without contacting the registry. A live publish uses `NPM_CONFIG_TOKEN` with a
+classic GitHub PAT that has `write:packages`. The release workflow runs the
+complete `prepublishOnly` gate, which requires a fresh complete registry
+snapshot, packs without repeating lifecycle scripts, and runs `bun publish` on
+that reviewed tarball from a clean temporary directory with the GitHub Packages
+registry supplied explicitly. Keeping the publish process outside the source
+directory prevents the source checkout's registry-only `.npmrc` from replacing
+Bun's native workflow token. GitHub Actions uses the repository `GITHUB_TOKEN`
+with `packages: write`.
 
 ## Construct a client
 
