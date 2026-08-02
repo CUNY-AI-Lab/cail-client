@@ -59,6 +59,9 @@ describe("client release version authority", () => {
     );
     expect(publishWorkflow).toContain("--paginate");
     expect(publishWorkflow).toContain("jq -s 'add'");
+    expect(publishWorkflow).toMatch(
+      /set -o pipefail\s+gh api --paginate/u,
+    );
     expect(publishWorkflow).toContain(
       'CAIL_REGISTRY_VERSIONS_FILE="$RUNNER_TEMP/cail-client-package-versions.json"',
     );
