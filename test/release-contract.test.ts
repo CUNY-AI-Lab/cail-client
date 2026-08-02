@@ -347,7 +347,7 @@ describe("release and CI boundary", () => {
   });
 
   it("runs hermetic local gates before checking publication authority", () => {
-    expect(packageJson.packageManager).toBe("bun@1.3.5");
+    expect(packageJson.packageManager).toBe("bun@1.3.14");
     expect(packageJson.scripts?.["check"]).toContain("bun run check:format");
     expect(packageJson.scripts?.["check"]).toContain("bun run typecheck");
     expect(packageJson.scripts?.["check"]).toContain("bun run test");

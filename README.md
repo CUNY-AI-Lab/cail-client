@@ -48,7 +48,7 @@ Pin an exact published release, for example
 `"@cuny-ai-lab/cail-client": "2.0.0"`, then
 run `bun install` with `NODE_AUTH_TOKEN` set in the environment to a GitHub
 PAT that has `read:packages` (supplied by a user-level `~/.npmrc` or a CI
-secret). Bun 1.3.5 reads the registry and token interpolation from `.npmrc`;
+secret). Bun 1.3.14 reads the registry and token interpolation from `.npmrc`;
 the npm CLI is not required.
 
 Maintainers keep authentication outside the repository. The source checkout
