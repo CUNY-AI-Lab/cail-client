@@ -44,7 +44,8 @@ consuming repository's `.npmrc`. Never place an actual token in this file:
 //npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
 ```
 
-Pin an exact release, for example `"@cuny-ai-lab/cail-client": "2.0.1"`, then
+Pin an exact published release, for example
+`"@cuny-ai-lab/cail-client": "2.0.0"`, then
 run `bun install` with `NODE_AUTH_TOKEN` set in the environment to a GitHub
 PAT that has `read:packages` (supplied by a user-level `~/.npmrc` or a CI
 secret). Bun 1.3.5 reads the registry and token interpolation from `.npmrc`;
@@ -59,14 +60,15 @@ Packages.
 
 The reviewed cail-log artifact and its immutable registry receipt are present,
 so that dependency gate is satisfied. Client 2.0.0 is already present in the
-registry; this source uses the unoccupied 2.0.1 successor and does not claim it
-has been published. The checked-in release authority records the 2.0.0 package
-version identity and the dated observation that 2.0.1 was absent. The publish
-workflow repeats that read-only registry query immediately before publishing.
-Changing either local authority file alone cannot authorize a conflicting
-release. An exact source archive may run `bun install --frozen-lockfile` and
-`bun run check` without Git history. Publication is intentionally limited to a
-clean Git checkout and fails closed with a clear error in archive mode.
+registry. This source is an unreleased 3.0.0 candidate; its package version is
+not evidence that the registry version is available. The checked-in 2.0.1
+release-authority record remains immutable historical evidence of an earlier
+candidate and dated registry observation. A fresh read-only registry snapshot
+is required immediately before any future 3.0.0 publication. Changing local
+authority files alone cannot authorize a conflicting release. An exact source
+archive may run `bun install --frozen-lockfile` and `bun run check` without Git
+history. Publication is intentionally limited to a clean Git checkout and
+fails closed with a clear error in archive mode.
 
 Set `NPM_CONFIG_TOKEN` to a classic GitHub PAT with `write:packages` and verify
 the package with `bun publish --dry-run`. The release workflow runs the complete
@@ -377,6 +379,11 @@ the relationship `remaining = max(0, limit - used)`. A malformed 2xx body
 throws `CailError { code: "unknown_error" }`. The read is eventually
 consistent and is not evidence that a concurrent model request has or has not
 been accounted for.
+
+The snapshot preserves the Gateway's exact `window_technique` (`fixed` or
+`sliding`). `reset` is `number | null`; `null` means the provider did not expose
+a defensible reset bound. Consumers must not replace it with `now + window` or
+display an invented reset time.
 
 ## API
 

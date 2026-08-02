@@ -221,6 +221,7 @@ describe("quota wire vectors", () => {
       used: 630_000,
       remaining: 9_370_000,
       reset: 1_723_200_000,
+      window_technique: "sliding",
       as_of: 1_720_600_000,
       state: "ok",
       enforced: true,
@@ -231,10 +232,40 @@ describe("quota wire vectors", () => {
       { ...valid, currency: "EUR" },
       { ...valid, remaining: 123 },
       { ...valid, window_seconds: 0 },
+      { ...valid, window_technique: "rolling" },
+      { ...valid, window_technique: undefined },
+      { ...valid, reset: "unknown" },
     ]) {
       const { client } = clientFor(jsonOk(body), 0);
       await expect(client.getQuota(KEY)).rejects.toMatchObject({
         code: "unknown_error",
+      });
+    }
+  });
+
+  it("accepts an honest unavailable reset and preserves window technique", async () => {
+    for (const windowTechnique of ["fixed", "sliding"] as const) {
+      const { client } = clientFor(
+        jsonOk({
+          object: "quota",
+          subject: "app-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          unit: "microdollar",
+          currency: "USD",
+          window_seconds: 2_592_000,
+          window_technique: windowTechnique,
+          limit: 25_000_000,
+          used: 1_000_000,
+          remaining: 24_000_000,
+          reset: null,
+          as_of: 1_720_600_000,
+          state: "ok",
+          enforced: true,
+        }),
+        0,
+      );
+      await expect(client.getQuota(KEY)).resolves.toMatchObject({
+        reset: null,
+        window_technique: windowTechnique,
       });
     }
   });

@@ -77,11 +77,15 @@ export type CailCredential =
 export type CailMetadata = Record<string, string | number>;
 
 /** Shared quota values returned by the canonical `GET /quota` snapshot. */
+export type CailQuotaWindowTechnique = "fixed" | "sliding";
+
 export interface CailQuota {
   limit: number;
   used: number;
   remaining: number;
-  reset: number;
+  /** Provider-derived reset bound when available; `null` means unknown. */
+  reset: number | null;
+  window_technique: CailQuotaWindowTechnique;
   window_seconds: number;
   state: "ok" | "stale";
 }
@@ -396,12 +400,19 @@ const REQUEST_ID_RE =
 const CAIL_SUBJECT_RE = /^cail-[0-9a-f]{32}$/;
 const APP_SUBJECT_RE = /^app-[0-9a-f]{32}$/;
 const QUOTA_STATE_VALUES = new Set(["ok", "stale"]);
+const QUOTA_WINDOW_TECHNIQUE_VALUES = new Set(["fixed", "sliding"]);
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
 const MAX_EXTRACT_JSON_CHARS = 256 * 1024;
 const MAX_RESPONSE_METADATA_CHARS = 128;
 
 function isQuotaState(value: unknown): value is CailQuota["state"] {
   return typeof value === "string" && QUOTA_STATE_VALUES.has(value);
+}
+
+function isQuotaWindowTechnique(
+  value: unknown,
+): value is CailQuotaWindowTechnique {
+  return typeof value === "string" && QUOTA_WINDOW_TECHNIQUE_VALUES.has(value);
 }
 
 /**
@@ -1566,10 +1577,11 @@ function parseQuotaSnapshotBody(
   const limit = quotaBodyInteger(obj, "limit");
   const used = quotaBodyInteger(obj, "used");
   const remaining = quotaBodyInteger(obj, "remaining");
-  const reset = quotaBodyInteger(obj, "reset");
+  const reset = obj["reset"] === null ? null : quotaBodyInteger(obj, "reset");
   const windowSeconds = quotaBodyInteger(obj, "window_seconds");
   const asOf = quotaBodyInteger(obj, "as_of");
   const state = obj["state"];
+  const windowTechnique = obj["window_technique"];
 
   if (
     obj["object"] !== "quota" ||
@@ -1582,10 +1594,11 @@ function parseQuotaSnapshotBody(
     limit === null ||
     used === null ||
     remaining === null ||
-    reset === null ||
+    (obj["reset"] !== null && reset === null) ||
     windowSeconds === null ||
     asOf === null ||
     !isQuotaState(state) ||
+    !isQuotaWindowTechnique(windowTechnique) ||
     limit === 0 ||
     windowSeconds === 0 ||
     remaining !== Math.max(0, limit - used)
@@ -1599,6 +1612,7 @@ function parseQuotaSnapshotBody(
     used,
     remaining,
     reset,
+    window_technique: windowTechnique,
     window_seconds: windowSeconds,
     state,
     enforced: obj["enforced"],

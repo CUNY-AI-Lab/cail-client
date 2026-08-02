@@ -1,6 +1,6 @@
 {
   "name": "@cuny-ai-lab/cail-client",
-  "version": "2.0.1",
+  "version": "3.0.0",
   "description": "The CAIL model-proxy API client for CUNY applications: a pure Web-standard fetch wrapper that owns the credential, header, error, and retry contract. Runs unchanged in the browser, Cloudflare Workers, and Node >=20.",
   "type": "module",
   "license": "MIT",

@@ -159,6 +159,7 @@ export function quotaSnapshotBody(
     used: 630_000,
     remaining: 9_370_000,
     reset: 1_723_200_000,
+    window_technique: "sliding",
     window_seconds: 2_592_000,
     state: "ok",
     enforced: true,

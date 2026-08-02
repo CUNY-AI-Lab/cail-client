@@ -106,11 +106,15 @@ const REQUEST_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3
 const CAIL_SUBJECT_RE = /^cail-[0-9a-f]{32}$/;
 const APP_SUBJECT_RE = /^app-[0-9a-f]{32}$/;
 const QUOTA_STATE_VALUES = new Set(["ok", "stale"]);
+const QUOTA_WINDOW_TECHNIQUE_VALUES = new Set(["fixed", "sliding"]);
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
 const MAX_EXTRACT_JSON_CHARS = 256 * 1024;
 const MAX_RESPONSE_METADATA_CHARS = 128;
 function isQuotaState(value) {
     return typeof value === "string" && QUOTA_STATE_VALUES.has(value);
+}
+function isQuotaWindowTechnique(value) {
+    return typeof value === "string" && QUOTA_WINDOW_TECHNIQUE_VALUES.has(value);
 }
 /**
  * Validate + serialize `X-CAIL-Metadata` (I3). Throws a `CailError` (code
@@ -1065,10 +1069,11 @@ function parseQuotaSnapshotBody(body, status) {
     const limit = quotaBodyInteger(obj, "limit");
     const used = quotaBodyInteger(obj, "used");
     const remaining = quotaBodyInteger(obj, "remaining");
-    const reset = quotaBodyInteger(obj, "reset");
+    const reset = obj["reset"] === null ? null : quotaBodyInteger(obj, "reset");
     const windowSeconds = quotaBodyInteger(obj, "window_seconds");
     const asOf = quotaBodyInteger(obj, "as_of");
     const state = obj["state"];
+    const windowTechnique = obj["window_technique"];
     if (obj["object"] !== "quota" ||
         (typeof obj["subject"] !== "string" ||
             (!CAIL_SUBJECT_RE.test(obj["subject"]) &&
@@ -1079,10 +1084,11 @@ function parseQuotaSnapshotBody(body, status) {
         limit === null ||
         used === null ||
         remaining === null ||
-        reset === null ||
+        (obj["reset"] !== null && reset === null) ||
         windowSeconds === null ||
         asOf === null ||
         !isQuotaState(state) ||
+        !isQuotaWindowTechnique(windowTechnique) ||
         limit === 0 ||
         windowSeconds === 0 ||
         remaining !== Math.max(0, limit - used)) {
@@ -1094,6 +1100,7 @@ function parseQuotaSnapshotBody(body, status) {
         used,
         remaining,
         reset,
+        window_technique: windowTechnique,
         window_seconds: windowSeconds,
         state,
         enforced: obj["enforced"],

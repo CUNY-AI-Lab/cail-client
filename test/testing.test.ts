@@ -138,6 +138,7 @@ describe("quotaSnapshotBody / quotaSnapshotResponse", () => {
       used: 630_000,
       remaining: 9_370_000,
       reset: 1_723_200_000,
+      window_technique: "sliding",
       window_seconds: 2_592_000,
       state: "ok",
       enforced: true,
@@ -166,6 +167,26 @@ describe("quotaSnapshotBody / quotaSnapshotResponse", () => {
     expect(snapshot.remaining).toBe(0);
     expect(snapshot.state).toBe("stale");
     expect(snapshot.enforced).toBe(false);
+  });
+
+  it("builds nullable-reset fixed and sliding fixtures", async () => {
+    for (const windowTechnique of ["fixed", "sliding"] as const) {
+      const fetch = recordingFetch(
+        quotaSnapshotResponse({
+          reset: null,
+          window_technique: windowTechnique,
+        }),
+      );
+      const client = createCailClient({
+        baseUrl: "https://proxy.example",
+        app: "testing-fixture",
+        fetchImpl: fetch.fn,
+      });
+      await expect(client.getQuota(CRED)).resolves.toMatchObject({
+        reset: null,
+        window_technique: windowTechnique,
+      });
+    }
   });
 
   it("ships a canonical-shaped test subject", () => {

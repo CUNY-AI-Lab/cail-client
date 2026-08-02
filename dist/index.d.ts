@@ -61,11 +61,14 @@ export type CailCredential = {
 /** Optional per-call metadata (I3). Merged with any `X-CAIL-Metadata` in `init`. */
 export type CailMetadata = Record<string, string | number>;
 /** Shared quota values returned by the canonical `GET /quota` snapshot. */
+export type CailQuotaWindowTechnique = "fixed" | "sliding";
 export interface CailQuota {
     limit: number;
     used: number;
     remaining: number;
-    reset: number;
+    /** Provider-derived reset bound when available; `null` means unknown. */
+    reset: number | null;
+    window_technique: CailQuotaWindowTechnique;
     window_seconds: number;
     state: "ok" | "stale";
 }

@@ -35,6 +35,7 @@
     "used": 630000,
     "remaining": 9370000,
     "reset": 1723200000,
+    "window_technique": "sliding",
     "as_of": 1720600000,
     "state": "ok",
     "enforced": true

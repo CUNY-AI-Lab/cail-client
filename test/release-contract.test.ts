@@ -333,7 +333,7 @@ describe("release and CI boundary", () => {
     );
     const output = (result.stdout ?? "") + (result.stderr ?? "");
     expect(`${result.status}\n${output}`).toBe(`0\n${output}`);
-    expect(output).toContain("cuny-ai-lab-cail-client-2.0.1.tgz");
+    expect(output).toContain("cuny-ai-lab-cail-client-3.0.0.tgz");
   });
 
   it("sends the workflow token in an actual hermetic publish request", async () => {
@@ -564,8 +564,8 @@ describe("release and CI boundary", () => {
   it("documents Bun-native GitHub Packages publishing only", () => {
     expect(readme).toContain("bun publish --dry-run");
     expect(readme).toContain("bun publish");
-    expect(readme).toContain("does not claim it");
-    expect(readme).toContain("2.0.1 was absent");
+    expect(readme).toContain("unreleased 3.0.0 candidate");
+    expect(readme).toContain("not evidence that the registry version is available");
     expect(readme).not.toContain("npm publish");
     expect(readme).not.toMatch(/Bun .*cannot authenticate/i);
   });
