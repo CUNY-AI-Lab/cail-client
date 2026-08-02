@@ -4,12 +4,18 @@ import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const authorityPath = resolve(
+const historicalAuthorityPath = resolve(
   root,
   "vendor/cail-client-2.0.1.release-authority.json",
 );
-const expectedRuntimeSha256 =
+const candidateAuthorityPath = resolve(
+  root,
+  "vendor/cail-client-3.0.0.release-authority.json",
+);
+const expectedHistoricalRuntimeSha256 =
   "295aa0653c7277675fe5aec1c8198d9addc997205a78f2c58141c7942f1e2765";
+const expectedCandidateRuntimeSha256 =
+  "fc8c49c89ce3752846d25fe3434f834be0c9c5ea906fe1e87cb633cea839288a";
 
 type Version = {
   id?: unknown;
@@ -54,37 +60,73 @@ export function runtimeDigest(): string {
   return hash.digest("hex");
 }
 
-export function isValidAuthority(authority: Authority): boolean {
-  const published = authority.registry?.published_versions;
-  return (
-    authority.schema_version === 1 &&
-    authority.package?.name === "@cuny-ai-lab/cail-client" &&
-    authority.package?.candidate_version === "2.0.1" &&
-    authority.behavior_authority?.commit ===
-      "7f5e73ce2b6fc6a7a490767a4369206cd21b0547" &&
-    authority.behavior_authority?.tree ===
-      "c035e086c2ede410f2f9ec4a02fb4581c10f8c84" &&
-    JSON.stringify(authority.behavior_authority?.runtime_paths) ===
-      JSON.stringify(["contract", "src"]) &&
-    authority.behavior_authority?.runtime_sha256 ===
-      expectedRuntimeSha256 &&
-    authority.registry?.url === "https://npm.pkg.github.com" &&
-    authority.registry?.api ===
-      "https://api.github.com/orgs/CUNY-AI-Lab/packages/npm/cail-client/versions" &&
-    typeof authority.registry?.observed_at === "string" &&
-    authority.registry.candidate_state === "not_published" &&
-    Array.isArray(published) &&
-    published.some(
-      (entry) =>
-        typeof entry === "object" &&
-        entry !== null &&
-        (entry as Record<string, unknown>).version === "2.0.0" &&
-        (entry as Record<string, unknown>).package_version_id ===
-          1066318244 &&
-        (entry as Record<string, unknown>).published_at ===
-          "2026-07-25T17:33:30Z",
-    )
-  );
+const expectedHistoricalAuthority = {
+  schema_version: 1,
+  package: {
+    name: "@cuny-ai-lab/cail-client",
+    candidate_version: "2.0.1",
+  },
+  behavior_authority: {
+    commit: "7f5e73ce2b6fc6a7a490767a4369206cd21b0547",
+    tree: "c035e086c2ede410f2f9ec4a02fb4581c10f8c84",
+    runtime_paths: ["contract", "src"],
+    runtime_sha256: expectedHistoricalRuntimeSha256,
+  },
+  registry: {
+    url: "https://npm.pkg.github.com",
+    api: "https://api.github.com/orgs/CUNY-AI-Lab/packages/npm/cail-client/versions",
+    observed_at: "2026-07-25T21:36:35Z",
+    published_versions: [
+      {
+        version: "2.0.0",
+        package_version_id: 1066318244,
+        published_at: "2026-07-25T17:33:30Z",
+      },
+      {
+        version: "1.3.0",
+        package_version_id: 1046114991,
+        published_at: "2026-07-19T22:33:40Z",
+      },
+      {
+        version: "1.2.0",
+        package_version_id: 1045905844,
+        published_at: "2026-07-19T19:58:29Z",
+      },
+      {
+        version: "1.1.0",
+        package_version_id: 1045861034,
+        published_at: "2026-07-19T19:27:44Z",
+      },
+    ],
+    candidate_state: "not_published",
+  },
+};
+
+const expectedCandidateAuthority = {
+  schema_version: 1,
+  package: {
+    name: "@cuny-ai-lab/cail-client",
+    candidate_version: "3.0.0",
+  },
+  behavior_authority: {
+    commit: "605c040cd2915db75f056219f079911ccd860b8f",
+    tree: "478d536a6a9f96089e406212bdf8e2d5461c97c1",
+    runtime_paths: ["contract", "src"],
+    runtime_sha256: expectedCandidateRuntimeSha256,
+  },
+  registry: {
+    url: "https://npm.pkg.github.com",
+    api: "https://api.github.com/orgs/CUNY-AI-Lab/packages/npm/cail-client/versions",
+    candidate_state: "live_preflight_required",
+  },
+};
+
+export function isValidHistoricalAuthority(authority: Authority): boolean {
+  return JSON.stringify(authority) === JSON.stringify(expectedHistoricalAuthority);
+}
+
+export function isValidCandidateAuthority(authority: Authority): boolean {
+  return JSON.stringify(authority) === JSON.stringify(expectedCandidateAuthority);
 }
 
 export function isValidLiveVersions(versions: Version[]): boolean {
@@ -94,22 +136,26 @@ export function isValidLiveVersions(versions: Version[]): boolean {
         version.id === 1066318244 &&
         version.name === "2.0.0" &&
         version.created_at === "2026-07-25T17:33:30Z",
-    ) && !versions.some((version) => version.name === "2.0.1")
+    ) && !versions.some((version) => version.name === "3.0.0")
   );
 }
 
 function main(): void {
-  const authority = JSON.parse(
-    readFileSync(authorityPath, "utf8"),
+  const historicalAuthority = JSON.parse(
+    readFileSync(historicalAuthorityPath, "utf8"),
+  ) as Authority;
+  const candidateAuthority = JSON.parse(
+    readFileSync(candidateAuthorityPath, "utf8"),
   ) as Authority;
   const packageJson = JSON.parse(
     readFileSync(resolve(root, "package.json"), "utf8"),
   ) as { name?: unknown; version?: unknown };
   if (
-    !isValidAuthority(authority) ||
+    !isValidHistoricalAuthority(historicalAuthority) ||
+    !isValidCandidateAuthority(candidateAuthority) ||
     packageJson.name !== "@cuny-ai-lab/cail-client" ||
-    packageJson.version !== "2.0.1" ||
-    runtimeDigest() !== expectedRuntimeSha256
+    packageJson.version !== "3.0.0" ||
+    runtimeDigest() !== expectedCandidateRuntimeSha256
   ) {
     throw new Error("cail-client: local release authority is invalid");
   }
@@ -125,7 +171,7 @@ function main(): void {
     ) as Version[];
     if (!Array.isArray(versions) || !isValidLiveVersions(versions)) {
       throw new Error(
-        "cail-client: registry version authority changed or 2.0.1 already exists",
+        "cail-client: registry version authority changed or 3.0.0 already exists",
       );
     }
   }

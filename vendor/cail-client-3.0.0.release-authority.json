@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "package": {
+    "name": "@cuny-ai-lab/cail-client",
+    "candidate_version": "3.0.0"
+  },
+  "behavior_authority": {
+    "commit": "605c040cd2915db75f056219f079911ccd860b8f",
+    "tree": "478d536a6a9f96089e406212bdf8e2d5461c97c1",
+    "runtime_paths": [
+      "contract",
+      "src"
+    ],
+    "runtime_sha256": "fc8c49c89ce3752846d25fe3434f834be0c9c5ea906fe1e87cb633cea839288a"
+  },
+  "registry": {
+    "url": "https://npm.pkg.github.com",
+    "api": "https://api.github.com/orgs/CUNY-AI-Lab/packages/npm/cail-client/versions",
+    "candidate_state": "live_preflight_required"
+  }
+}

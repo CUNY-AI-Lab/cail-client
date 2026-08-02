@@ -61,10 +61,12 @@ Packages.
 The reviewed cail-log artifact and its immutable registry receipt are present,
 so that dependency gate is satisfied. Client 2.0.0 is already present in the
 registry. This source is an unreleased 3.0.0 candidate; its package version is
-not evidence that the registry version is available. The checked-in 2.0.1
-release-authority record remains immutable historical evidence of an earlier
-candidate and dated registry observation. A fresh read-only registry snapshot
-is required immediately before any future 3.0.0 publication. Changing local
+not evidence that the registry version is available. The source-local 3.0.0
+authority binds the exact reviewed behavior commit, tree, and runtime digest;
+it deliberately contains no registry-availability claim. The checked-in 2.0.1
+record remains immutable historical evidence of an earlier candidate and dated
+registry observation. A complete, paginated, read-only registry snapshot is
+required immediately before any future 3.0.0 publication. Changing local
 authority files alone cannot authorize a conflicting release. An exact source
 archive may run `bun install --frozen-lockfile` and `bun run check` without Git
 history. Publication is intentionally limited to a clean Git checkout and

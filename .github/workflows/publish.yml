@@ -26,10 +26,10 @@ jobs:
           test "v${PACKAGE_VERSION}" = "${GITHUB_REF_NAME}"
       - name: Verify immutable registry version authority
         run: |
-          gh api \
+          gh api --paginate \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
             '/orgs/CUNY-AI-Lab/packages/npm/cail-client/versions?per_page=100&state=active' \
-            > "$RUNNER_TEMP/cail-client-package-versions.json"
+            | jq -s 'add' > "$RUNNER_TEMP/cail-client-package-versions.json"
           CAIL_REGISTRY_VERSIONS_FILE="$RUNNER_TEMP/cail-client-package-versions.json" \
             bun run check:release-live
         env:

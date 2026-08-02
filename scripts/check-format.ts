@@ -20,6 +20,7 @@ const textAuthorities = [
   "tsconfig.test.json",
   "vendor/cail-log-0.6.0.authority.json",
   "vendor/cail-client-2.0.1.release-authority.json",
+  "vendor/cail-client-3.0.0.release-authority.json",
   "vitest.config.ts",
 ];
 const failures: string[] = [];
