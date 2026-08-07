@@ -40,10 +40,11 @@
     "check:release-authority": "bun scripts/check-client-release-authority.ts",
     "check:release-ref": "bun scripts/check-client-release-ref.ts",
     "check:release-live": "bun scripts/check-client-release-authority.ts --live",
+    "check:publication-preflight": "bun scripts/check-client-release-authority.ts --publication-preflight",
     "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "bun run check && bun run check:clean && bun run check:publication-authority && bun run check:release-live",
+    "prepublishOnly": "bun run check && bun run check:clean && bun run check:publication-authority && bun run check:release-ref && bun run check:publication-preflight",
     "prepare": "bun run build"
   },
   "dependencies": {

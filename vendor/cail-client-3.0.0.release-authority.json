@@ -2,7 +2,7 @@
   "schema_version": 1,
   "package": {
     "name": "@cuny-ai-lab/cail-client",
-    "candidate_version": "3.0.0"
+    "version": "3.0.0"
   },
   "behavior_authority": {
     "commit": "605c040cd2915db75f056219f079911ccd860b8f",
@@ -13,9 +13,36 @@
     ],
     "runtime_sha256": "fc8c49c89ce3752846d25fe3434f834be0c9c5ea906fe1e87cb633cea839288a"
   },
+  "release": {
+    "tag": "v3.0.0",
+    "commit": "7f28944d6d262e8f61c7bca7d6833d2973078842",
+    "tree": "c242ca124301c9d07e4e4e20276901a03a174dff",
+    "release_id": 363834941,
+    "release_url": "https://github.com/CUNY-AI-Lab/cail-client/releases/tag/v3.0.0",
+    "published_at": "2026-08-02T16:28:59Z",
+    "workflow_run_id": 30756728587,
+    "workflow_run_url": "https://github.com/CUNY-AI-Lab/cail-client/actions/runs/30756728587",
+    "workflow_job_id": 91520060337,
+    "workflow_job_url": "https://github.com/CUNY-AI-Lab/cail-client/actions/runs/30756728587/job/91520060337",
+    "run_status": "completed",
+    "run_conclusion": "success"
+  },
   "registry": {
     "url": "https://npm.pkg.github.com",
     "api": "https://api.github.com/orgs/CUNY-AI-Lab/packages/npm/cail-client/versions",
-    "candidate_state": "live_preflight_required"
+    "package_id": 13479481,
+    "version_id": 1091020674,
+    "version": "3.0.0",
+    "created_at": "2026-08-02T16:29:40Z",
+    "observed_at": "2026-08-06T20:48:40Z",
+    "state": "published",
+    "artifact": {
+      "url": "https://npm.pkg.github.com/download/@cuny-ai-lab/cail-client/3.0.0/8bd43f0ee8e218a40c34b21a116112a727901b5d",
+      "bytes": 61519,
+      "sha1": "8bd43f0ee8e218a40c34b21a116112a727901b5d",
+      "sha256": "4d50e0c051e14467ea9a79c4c744a8280dc1d8729cb98a0ef11be989fb245eaf",
+      "integrity": "sha512-HnKVCH+6PQedqD6WryxXMEi5mGzSqOo/wkOVFo9FMjGNaPqLLXMf5njcIJLjdA1pbKiASIM886wjep16f7lV5w==",
+      "git_tree_sha256": "6e9dcf302101086c2553ca6314e67d163dd719a24f3a2079c167b06b6931681e"
+    }
   }
 }
