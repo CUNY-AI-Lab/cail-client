@@ -59,14 +59,14 @@ client truthfully depends on exact `@cuny-ai-lab/cail-log` 0.6.0 from GitHub
 Packages.
 
 The reviewed cail-log artifact and its immutable registry receipt are present,
-so that dependency gate is satisfied. Client 2.0.0 is already present in the
-registry. This source is an unreleased 3.0.0 candidate; its package version is
-not evidence that the registry version is available. The source-local 3.0.0
-authority binds the exact reviewed behavior commit, tree, and runtime digest;
-it deliberately contains no registry-availability claim. The checked-in 2.0.1
-record remains immutable historical evidence of an earlier candidate and dated
-registry observation. A complete, paginated, read-only registry snapshot is
-required immediately before any future 3.0.0 publication. Changing local
+so that dependency gate is satisfied. Client 2.0.0 and 3.0.0 are present in the
+registry. The checked-in 3.0.0 authority is an immutable published-release
+record binding its exact behavior commit, tree, runtime digest, release, and
+artifact evidence. This source is a 3.0.1 candidate; its package version is
+not evidence that the registry version is available. The 3.0.1 authority binds
+the approved behavior commit, tree, and runtime digest plus a dated snapshot
+where 3.0.1 is absent. A complete, paginated, read-only registry snapshot is
+required immediately before any future 3.0.1 publication. Changing local
 authority files alone cannot authorize a conflicting release. An exact source
 archive may run `bun install --frozen-lockfile` and `bun run check` without Git
 history. Publication is intentionally limited to a clean Git checkout and
@@ -75,8 +75,8 @@ fails closed with a clear error in archive mode.
 The release workflow also requires the published release tag to be exactly
 `v<package version>` and to resolve, through the read-only GitHub contents API,
 to the live default-branch head. It compares that commit with `GITHUB_SHA`, so a
-version-matching tag made from an older commit cannot publish. Until the correct
-3.0.0 occupies its immutable registry version, an already-created tag that
+version-matching tag made from an older commit cannot publish. Until the 3.0.1
+candidate occupies its immutable registry version, an already-created tag that
 points at an older workflow cannot be repaired retroactively: exact tag
 creation, protected-tag configuration, and any temporary workflow disable are
 approval-bound remote-control steps.

@@ -1232,7 +1232,8 @@ export function createCailClient(opts) {
         }
         const target = resolveCallTarget(path);
         if ((target.routePath === "/v1/run" ||
-            target.routePath === "/v1/chat/completions") &&
+            target.routePath === "/v1/chat/completions" ||
+            target.routePath === "/v1/responses") &&
             internal?.modelRun !== true) {
             throw new CailError("invalid_request", "Use run() or chatCompletions() for model invocation.", 0);
         }

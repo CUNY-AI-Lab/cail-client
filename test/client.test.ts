@@ -1839,12 +1839,22 @@ describe("I8 — canonical model run", () => {
     expect(rec.captured).toHaveLength(0);
   });
 
+  it("generic call() cannot invoke the Responses model endpoint", async () => {
+    const { rec, client } = wired(jsonOk({}));
+    await expect(
+      client.call("/v1/responses", { method: "POST" }, KEY),
+    ).rejects.toMatchObject({ code: "invalid_request", status: 0 });
+    expect(rec.captured).toHaveLength(0);
+  });
+
   it("generic call() cannot bypass model-route ownership with query, fragment, or trailing slash", async () => {
     for (const path of [
       "/v1/run?mode=unsafe",
       "/v1/run/",
       "/v1/chat/completions#unsafe",
       "/v1/chat/completions///?mode=unsafe",
+      "/v1/responses?mode=unsafe",
+      "/v1/responses/",
     ]) {
       const { rec, client } = wired(jsonOk({}));
       await expect(

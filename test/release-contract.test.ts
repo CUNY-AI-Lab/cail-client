@@ -333,7 +333,7 @@ describe("release and CI boundary", () => {
     );
     const output = (result.stdout ?? "") + (result.stderr ?? "");
     expect(`${result.status}\n${output}`).toBe(`0\n${output}`);
-    expect(output).toContain("cuny-ai-lab-cail-client-3.0.0.tgz");
+    expect(output).toContain("cuny-ai-lab-cail-client-3.0.1.tgz");
   });
 
   it("sends the workflow token in an actual hermetic publish request", async () => {
@@ -564,7 +564,8 @@ describe("release and CI boundary", () => {
   it("documents Bun-native GitHub Packages publishing only", () => {
     expect(readme).toContain("bun pm pack --dry-run --ignore-scripts");
     expect(readme).toContain("bun publish");
-    expect(readme).toContain("unreleased 3.0.0 candidate");
+    expect(readme).toContain("Client 2.0.0 and 3.0.0 are present");
+    expect(readme).toContain("This source is a 3.0.1 candidate");
     expect(readme).toContain("not evidence that the registry version is available");
     expect(readme).toMatch(/fresh complete registry\s+snapshot/u);
     expect(readme).toContain("cannot be repaired retroactively");
