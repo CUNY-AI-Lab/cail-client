@@ -363,7 +363,11 @@ export interface CailClient {
    */
   getCatalog(options?: CailCatalogOptions): Promise<Response>;
 
-  /** Read and validate the public catalog as CAIL-defined plain data. */
+  /**
+   * Read and validate the public catalog as CAIL-defined plain data. The
+   * consumed response is bounded at the Gateway's 8 MiB response ceiling;
+   * oversized bodies are cancelled and fail closed.
+   */
   getCatalogSnapshot(options?: CailCatalogOptions): Promise<CailModelCatalog>;
 
   /**
@@ -402,6 +406,12 @@ const APP_SUBJECT_RE = /^app-[0-9a-f]{32}$/;
 const QUOTA_STATE_VALUES = new Set(["ok", "stale"]);
 const QUOTA_WINDOW_TECHNIQUE_VALUES = new Set(["fixed", "sliding"]);
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
+// Public catalog snapshots have a larger, separate transport bound. The
+// Gateway's source-owned response-byte ceiling is 8 MiB; keep that bound
+// here rather than applying the 64 KiB error-body limit to a valid catalog.
+// This wire bound intentionally does not change the standalone in-memory
+// parser's schema limits, which are a separate contract.
+const MAX_CATALOG_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_EXTRACT_JSON_CHARS = 256 * 1024;
 const MAX_RESPONSE_METADATA_CHARS = 128;
 
@@ -2374,7 +2384,7 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     try {
       bodyText = await responseTextWithinLimit(
         response,
-        MAX_ERROR_BODY_BYTES,
+        MAX_CATALOG_BODY_BYTES,
         options?.signal,
       );
     } catch (cause) {

@@ -276,7 +276,11 @@ export interface CailClient {
      * or ambient browser credentials.
      */
     getCatalog(options?: CailCatalogOptions): Promise<Response>;
-    /** Read and validate the public catalog as CAIL-defined plain data. */
+    /**
+     * Read and validate the public catalog as CAIL-defined plain data. The
+     * consumed response is bounded at the Gateway's 8 MiB response ceiling;
+     * oversized bodies are cancelled and fail closed.
+     */
     getCatalogSnapshot(options?: CailCatalogOptions): Promise<CailModelCatalog>;
     /**
      * Read the authenticated user or app subject's stateless quota snapshot from

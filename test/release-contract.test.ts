@@ -333,7 +333,7 @@ describe("release and CI boundary", () => {
     );
     const output = (result.stdout ?? "") + (result.stderr ?? "");
     expect(`${result.status}\n${output}`).toBe(`0\n${output}`);
-    expect(output).toContain("cuny-ai-lab-cail-client-3.0.1.tgz");
+    expect(output).toContain("cuny-ai-lab-cail-client-3.0.2.tgz");
   });
 
   it("sends the workflow token in an actual hermetic publish request", async () => {
@@ -376,6 +376,12 @@ describe("release and CI boundary", () => {
     );
     expect(packageJson.scripts?.["prepublishOnly"]).toContain(
       "bun run check:publication-authority",
+    );
+    expect(packageJson.scripts?.["prepublishOnly"]).toContain(
+      "bun run check:publication-preflight",
+    );
+    expect(packageJson.scripts?.["prepublishOnly"]).not.toContain(
+      "bun run check:release-live",
     );
   });
 
@@ -564,10 +570,10 @@ describe("release and CI boundary", () => {
   it("documents Bun-native GitHub Packages publishing only", () => {
     expect(readme).toContain("bun pm pack --dry-run --ignore-scripts");
     expect(readme).toContain("bun publish");
-    expect(readme).toContain("Client 2.0.0 and 3.0.0 are present");
-    expect(readme).toContain("This source is a 3.0.1 candidate");
-    expect(readme).toContain("not evidence that the registry version is available");
-    expect(readme).toMatch(/fresh complete registry\s+snapshot/u);
+    expect(readme).toContain("Client 2.0.0, 3.0.0, and 3.0.1 are");
+    expect(readme).toContain("The 3.0.2 release authority binds");
+    expect(readme).toContain("GitHub Packages immutability");
+    expect(readme).toMatch(/fresh complete active-registry\s+snapshot/u);
     expect(readme).toContain("cannot be repaired retroactively");
     expect(readme).not.toContain("npm publish");
     expect(readme).not.toMatch(/Bun .*cannot authenticate/i);

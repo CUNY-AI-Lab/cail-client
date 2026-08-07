@@ -27,6 +27,7 @@ const BASE = "https://api.ailab.example";
 const APP = "alt-text";
 const JWT: CailCredential = { kind: "jwt", token: "jwt-token-abc" };
 const KEY: CailCredential = { kind: "key", token: "sk-cail-xyz" };
+const CATALOG_BODY_LIMIT_BYTES = 8 * 1024 * 1024;
 
 /** Build a client wired to a fresh recording fetch. */
 function wired(
@@ -96,6 +97,33 @@ function bytes(...parts: Uint8Array[]): Uint8Array {
     offset += part.byteLength;
   }
   return result;
+}
+
+function largeCatalogFixture(count = 290) {
+  return {
+    object: "list" as const,
+    data: Array.from({ length: count }, (_, index) => {
+      const suffix = String(index + 1).padStart(3, "0");
+      return {
+        id: `@cf/example/model-${suffix}`,
+        object: "model" as const,
+        recommended: false,
+        tier: "advanced" as const,
+        order: index + 1,
+        status: "active" as const,
+        modality: "text" as const,
+        provider: "workers-ai" as const,
+        upstream_model: `@cf/example/model-${suffix}`,
+        pricing_known: "catalog" as const,
+        streaming: true,
+        sunset: null,
+        capabilities: ["text-generation"],
+        context_length: null,
+        registry_url: null,
+        description: `Catalog fixture ${suffix}: café 😀 ${"x".repeat(320)}`,
+      };
+    }),
+  };
 }
 
 async function rejectionWithin(
@@ -1935,6 +1963,94 @@ describe("public model catalog", () => {
     };
     const { client } = wired(jsonOk(body));
     await expect(client.getCatalogSnapshot()).resolves.toEqual(body);
+  });
+
+  it("parses a valid catalog larger than 64 KiB across a UTF-8 chunk boundary", async () => {
+    const expected = largeCatalogFixture();
+    const encoded = new TextEncoder().encode(JSON.stringify(expected));
+    expect(encoded.byteLength).toBeGreaterThan(64 * 1024);
+    const splitAt = encoded.findIndex(
+      (byte, index) =>
+        index > 0 && byte >= 0x80 && byte <= 0xbf,
+    );
+    expect(splitAt).toBeGreaterThan(0);
+
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        // Start the second chunk on a UTF-8 continuation byte. The bounded
+        // reader must preserve the decoder state across this boundary.
+        controller.enqueue(encoded.slice(0, splitAt));
+        controller.enqueue(encoded.slice(splitAt));
+        controller.close();
+      },
+    });
+    const { client } = wired(
+      new Response(body, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await expect(client.getCatalogSnapshot()).resolves.toEqual(expected);
+  });
+
+  it("accepts a catalog response exactly at the 8 MiB byte boundary", async () => {
+    const expected = { object: "list" as const, data: [] };
+    const prefix = JSON.stringify(expected);
+    const prefixBytes = new TextEncoder().encode(prefix).byteLength;
+    const body = `${prefix}${" ".repeat(CATALOG_BODY_LIMIT_BYTES - prefixBytes)}`;
+    expect(new TextEncoder().encode(body).byteLength).toBe(
+      CATALOG_BODY_LIMIT_BYTES,
+    );
+
+    const { client } = wired(
+      new Response(body, {
+        status: 200,
+        headers: {
+          "content-length": String(CATALOG_BODY_LIMIT_BYTES),
+          "content-type": "application/json",
+        },
+      }),
+    );
+
+    await expect(client.getCatalogSnapshot()).resolves.toEqual(expected);
+  });
+
+  it("cancels and fails closed when a catalog response exceeds 8 MiB", async () => {
+    const oversized = new Uint8Array(CATALOG_BODY_LIMIT_BYTES + 1);
+    const prefix = new TextEncoder().encode(
+      JSON.stringify({ object: "list", data: [] }),
+    );
+    oversized.set(prefix);
+    oversized.fill(0x20, prefix.byteLength);
+    let cancelCalls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(oversized);
+      },
+      cancel() {
+        cancelCalls++;
+      },
+    });
+    const { client } = wired(
+      new Response(body, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const error = await client.getCatalogSnapshot().catch((cause) => cause);
+
+    expect(error).toMatchObject({
+      code: "unknown_error",
+      status: 200,
+      message:
+        "The CAIL backbone returned an unexpected model catalog (status 200).",
+    });
+    expect(Object.hasOwn(error, "cause")).toBe(false);
+    expect(JSON.stringify(error)).not.toContain("oversized");
+    expect(cancelCalls).toBe(1);
+    expect(body.locked).toBe(false);
   });
 
   it("keeps a catalog body-read failure as the private cause", async () => {

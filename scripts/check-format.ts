@@ -22,6 +22,7 @@ const textAuthorities = [
   "vendor/cail-client-2.0.1.release-authority.json",
   "vendor/cail-client-3.0.0.release-authority.json",
   "vendor/cail-client-3.0.1.release-authority.json",
+  "vendor/cail-client-3.0.2.release-authority.json",
   "vitest.config.ts",
 ];
 const failures: string[] = [];
