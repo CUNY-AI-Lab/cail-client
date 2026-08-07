@@ -5,6 +5,7 @@ import {
   isValidCandidateAuthority,
   isValidHistoricalAuthority,
   isValidLiveVersions,
+  isValidPublicationPreflight,
   isValidPublishedAuthority,
   runtimeDigest,
 } from "../scripts/check-client-release-authority.js";
@@ -26,7 +27,7 @@ const publishedAuthority = JSON.parse(
   readFileSync(
     resolve(
       import.meta.dirname,
-      "../vendor/cail-client-3.0.0.release-authority.json",
+      "../vendor/cail-client-3.0.1.release-authority.json",
     ),
     "utf8",
   ),
@@ -35,7 +36,7 @@ const candidateAuthority = JSON.parse(
   readFileSync(
     resolve(
       import.meta.dirname,
-      "../vendor/cail-client-3.0.1.release-authority.json",
+      "../vendor/cail-client-3.0.2.release-authority.json",
     ),
     "utf8",
   ),
@@ -65,7 +66,7 @@ function releaseApi(tagSha: string, branchSha: string): GithubJson {
       { object: { sha: branchSha, type: "commit" } },
     ],
     [
-      "/repos/CUNY-AI-Lab/cail-client/git/ref/tags/v3.0.1",
+      "/repos/CUNY-AI-Lab/cail-client/git/ref/tags/v3.0.2",
       { object: { sha: tagSha, type: "commit" } },
     ],
   ]);
@@ -76,30 +77,30 @@ function releaseApi(tagSha: string, branchSha: string): GithubJson {
 }
 
 const exactReleaseContext = {
-  packageVersion: "3.0.1",
+  packageVersion: "3.0.2",
   repository: "CUNY-AI-Lab/cail-client",
   refType: "tag",
-  refName: "v3.0.1",
+  refName: "v3.0.2",
   sha: currentHead,
 } as const;
 
 describe("client release version authority", () => {
-  it("preserves 3.0.0 evidence and binds the 3.0.1 candidate", () => {
+  it("preserves 3.0.1 evidence and binds the 3.0.2 candidate", () => {
     expect(isValidHistoricalAuthority(historicalAuthority)).toBe(true);
     expect(isValidPublishedAuthority(publishedAuthority)).toBe(true);
     expect(isValidCandidateAuthority(candidateAuthority)).toBe(true);
     expect(runtimeDigest()).toBe(
-      "ad2902c9e002c09524235460c9bc61b75bd1594297c0804afc5788ea723bb80c",
+      "3856d7b082c542f3b51c3b5833dd6d9b997582289e3d71188974e9ae4a0d0e43",
     );
   });
 
   it("rechecks live authority immediately before a future publish", () => {
-    expect(packageJson.version).toBe("3.0.1");
+    expect(packageJson.version).toBe("3.0.2");
     expect(packageJson.scripts.prepublishOnly).toContain(
       "bun run check:clean",
     );
     expect(packageJson.scripts.prepublishOnly).toContain(
-      "bun run check:release-live",
+      "bun run check:publication-preflight",
     );
     expect(publishWorkflow).toContain(
       "/orgs/CUNY-AI-Lab/packages/npm/cail-client/versions",
@@ -111,6 +112,12 @@ describe("client release version authority", () => {
     );
     expect(publishWorkflow).toContain(
       'CAIL_REGISTRY_VERSIONS_FILE="$RUNNER_TEMP/cail-client-package-versions.json"',
+    );
+    expect(publishWorkflow).toContain(
+      "bun run check:publication-preflight",
+    );
+    expect(publishWorkflow).toContain(
+      "github.event.release.prerelease == false",
     );
     expect(publishWorkflow).toContain("bun run check:release-ref");
     expect(publishWorkflow.match(/bun run check:release-ref/gu)).toHaveLength(2);
@@ -154,7 +161,7 @@ describe("client release version authority", () => {
         ...candidateAuthority,
         package: {
           ...candidateAuthority.package,
-          candidate_version: "2.0.0",
+          candidate_version: "3.0.1",
         },
       }),
     ).toBe(false);
@@ -172,9 +179,9 @@ describe("client release version authority", () => {
   it("requires the exact registry identity and current candidate absence", () => {
     const live = [
       {
-        id: 1091020674,
-        name: "3.0.0",
-        created_at: "2026-08-02T16:29:40Z",
+        id: 1109448066,
+        name: "3.0.1",
+        created_at: "2026-08-07T16:38:11Z",
       },
       {
         id: 1066318244,
@@ -182,19 +189,25 @@ describe("client release version authority", () => {
         created_at: "2026-07-25T17:33:30Z",
       },
     ];
-    expect(isValidLiveVersions(live)).toBe(true);
+    expect(isValidPublicationPreflight(live)).toBe(true);
     expect(
-      isValidLiveVersions([
+      isValidPublicationPreflight([
         ...live,
         {
           id: 1,
-          name: "3.0.1",
-          created_at: "2026-08-07T14:18:44Z",
+          name: "3.0.2",
+          created_at: "2026-08-07T22:31:24Z",
         },
       ]),
     ).toBe(false);
     expect(
-      isValidLiveVersions([{ ...live[0], id: 1066318245 }, live[1]!]),
+      isValidPublicationPreflight([{ ...live[0], id: 1109448067 }, live[1]!]),
     ).toBe(false);
+    expect(
+      isValidLiveVersions([
+        ...live,
+        { id: 7, name: "3.0.2", created_at: "2026-08-07T22:35:00Z" },
+      ]),
+    ).toBe(true);
   });
 });

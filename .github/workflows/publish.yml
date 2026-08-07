@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   publish:
+    if: ${{ github.event.release.prerelease == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -29,7 +30,7 @@ jobs:
           GITHUB_REF_NAME: ${{ github.ref_name }}
           GITHUB_SHA: ${{ github.sha }}
       - run: bun run check
-      - name: Verify immutable registry version authority
+      - name: Verify publication preflight registry authority
         run: |
           set -o pipefail
           gh api --paginate \
@@ -37,7 +38,7 @@ jobs:
             '/orgs/CUNY-AI-Lab/packages/npm/cail-client/versions?per_page=100&state=active' \
             | jq -s 'add' > "$RUNNER_TEMP/cail-client-package-versions.json"
           CAIL_REGISTRY_VERSIONS_FILE="$RUNNER_TEMP/cail-client-package-versions.json" \
-            bun run check:release-live
+            bun run check:publication-preflight
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish to GitHub Packages
@@ -60,3 +61,14 @@ jobs:
           CAIL_REGISTRY_VERSIONS_FILE: ${{ runner.temp }}/cail-client-package-versions.json
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_CONFIG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify published registry version authority
+        run: |
+          set -o pipefail
+          gh api --paginate \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            '/orgs/CUNY-AI-Lab/packages/npm/cail-client/versions?per_page=100&state=active' \
+            | jq -s 'add' > "$RUNNER_TEMP/cail-client-package-versions-after.json"
+          CAIL_REGISTRY_VERSIONS_FILE="$RUNNER_TEMP/cail-client-package-versions-after.json" \
+            bun run check:release-live
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

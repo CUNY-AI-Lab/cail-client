@@ -59,25 +59,22 @@ client truthfully depends on exact `@cuny-ai-lab/cail-log` 0.6.0 from GitHub
 Packages.
 
 The reviewed cail-log artifact and its immutable registry receipt are present,
-so that dependency gate is satisfied. Client 2.0.0 and 3.0.0 are present in the
-registry. The checked-in 3.0.0 authority is an immutable published-release
-record binding its exact behavior commit, tree, runtime digest, release, and
-artifact evidence. This source is a 3.0.1 candidate; its package version is
-not evidence that the registry version is available. The 3.0.1 authority binds
-the approved behavior commit, tree, and runtime digest plus a dated snapshot
-where 3.0.1 is absent. A complete, paginated, read-only registry snapshot is
-required immediately before any future 3.0.1 publication. Changing local
-authority files alone cannot authorize a conflicting release. An exact source
-archive may run `bun install --frozen-lockfile` and `bun run check` without Git
-history. Publication is intentionally limited to a clean Git checkout and
-fails closed with a clear error in archive mode.
+so that dependency gate is satisfied. Client 2.0.0, 3.0.0, and 3.0.1 are
+present in the registry. The checked-in 3.0.1 authority is an immutable
+published-release record binding its exact behavior commit, tree, runtime
+digest, release, workflow run, registry version, and tarball evidence. The 3.0.2 release authority binds the reviewed catalog bound fix and a complete,
+paginated active-registry snapshot used by the publication gate. GitHub Packages immutability
+and the reviewed never-used ground truth prevent reusing
+a version that was previously published. Changing local authority files alone
+cannot authorize a conflicting release. An exact source archive may run `bun install --frozen-lockfile` and
+`bun run check` without Git history. Publication is intentionally limited to a
+clean Git checkout and fails closed with a clear error in archive mode.
 
 The release workflow also requires the published release tag to be exactly
 `v<package version>` and to resolve, through the read-only GitHub contents API,
 to the live default-branch head. It compares that commit with `GITHUB_SHA`, so a
-version-matching tag made from an older commit cannot publish. Until the 3.0.1
-candidate occupies its immutable registry version, an already-created tag that
-points at an older workflow cannot be repaired retroactively: exact tag
+version-matching tag made from an older commit cannot publish. An already-created
+tag that points at an older workflow cannot be repaired retroactively: exact tag
 creation, protected-tag configuration, and any temporary workflow disable are
 approval-bound remote-control steps.
 
@@ -85,13 +82,15 @@ For a credential-free package-only check, run
 `bun pm pack --dry-run --ignore-scripts`; this verifies the packed contents
 without contacting the registry. A live publish uses `NPM_CONFIG_TOKEN` with a
 classic GitHub PAT that has `write:packages`. The release workflow runs the
-complete `prepublishOnly` gate, which requires a fresh complete registry
-snapshot, packs without repeating lifecycle scripts, and runs `bun publish` on
-that reviewed tarball from a clean temporary directory with the GitHub Packages
-registry supplied explicitly. Keeping the publish process outside the source
-directory prevents the source checkout's registry-only `.npmrc` from replacing
-Bun's native workflow token. GitHub Actions uses the repository `GITHUB_TOKEN`
-with `packages: write`.
+complete `prepublishOnly` gate, which requires a fresh complete active-registry
+snapshot, packs without repeating lifecycle scripts,
+and runs `bun publish` on that reviewed tarball from a clean temporary directory
+with the GitHub Packages registry supplied explicitly. After publication,
+`check:release-live` verifies that the target active record is present and
+revalidates the 3.0.1 artifact receipt. Keeping the publish process outside the
+source directory prevents the source checkout's registry-only `.npmrc` from
+replacing Bun's native workflow token. GitHub Actions uses the repository
+`GITHUB_TOKEN` with `packages: write`.
 
 ## Construct a client
 
