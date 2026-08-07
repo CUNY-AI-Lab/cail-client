@@ -1850,7 +1850,8 @@ export function createCailClient(opts: CailClientOptions): CailClient {
     const target = resolveCallTarget(path);
     if (
       (target.routePath === "/v1/run" ||
-        target.routePath === "/v1/chat/completions") &&
+        target.routePath === "/v1/chat/completions" ||
+        target.routePath === "/v1/responses") &&
       internal?.modelRun !== true
     ) {
       throw new CailError(
