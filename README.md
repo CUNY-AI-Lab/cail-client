@@ -45,7 +45,7 @@ consuming repository's `.npmrc`. Never place an actual token in this file:
 ```
 
 Pin an exact published release, for example
-`"@cuny-ai-lab/cail-client": "2.0.0"`, then
+`"@cuny-ai-lab/cail-client": "3.0.0"`, then
 run `bun install` with `NODE_AUTH_TOKEN` set in the environment to a GitHub
 PAT that has `read:packages` (supplied by a user-level `~/.npmrc` or a CI
 secret). Bun 1.3.14 reads the registry and token interpolation from `.npmrc`;
@@ -59,34 +59,59 @@ client truthfully depends on exact `@cuny-ai-lab/cail-log` 0.6.0 from GitHub
 Packages.
 
 The reviewed cail-log artifact and its immutable registry receipt are present,
-so that dependency gate is satisfied. Client 2.0.0 is already present in the
-registry. This source is an unreleased 3.0.0 candidate; its package version is
-not evidence that the registry version is available. The source-local 3.0.0
-authority binds the exact reviewed behavior commit, tree, and runtime digest;
-it deliberately contains no registry-availability claim. The checked-in 2.0.1
+so that dependency gate is satisfied. Client 2.0.0 and 3.0.0 are present in
+the registry. The checked-in 3.0.0 authority is an immutable published-release
+record: it binds the exact `v3.0.0` source tag, commit, tree, and runtime
+digest to the GitHub Packages package/version IDs and the independently
+verified tarball bytes, hashes, SRI, and installed tree hash. It also records
+the successful release workflow receipt. The local gate derives the package,
+behavior-runtime, source-tag, release, and registry checks rather than
+comparing a serialized copy of this file. The release workflow's GitHub API
+check enforces the tag even from a shallow checkout. The checked-in 2.0.1
 record remains immutable historical evidence of an earlier candidate and dated
-registry observation. A complete, paginated, read-only registry snapshot is
-required immediately before any future 3.0.0 publication. Changing local
-authority files alone cannot authorize a conflicting release. An exact source
-archive may run `bun install --frozen-lockfile` and `bun run check` without Git
-history. Publication is intentionally limited to a clean Git checkout and
-fails closed with a clear error in archive mode.
+registry observation.
+
+The published 3.0.0 tarball is immutable and its README still contains the
+pre-publication candidate wording. That is a known artifact defect recorded
+for next-release cleanup; the corrected README in this source checkout does
+not change the already-published tarball or claim that its docs were repaired.
+A same-version publication cannot replace this immutable artifact; future
+releases require a new package version and a new authority record. Changing
+local authority files alone cannot authorize a conflicting release.
+
+`bun run check:release-live` is a read-only verification of the already
+published 3.0.0: it requires a complete, paginated registry snapshot, checks
+the exact 3.0.0 and 2.0.0 records, then downloads the recorded tarball with
+bounded temporary storage and rechecks its bytes, SHA-1, SHA-256, SRI, and
+installed tree hash. `bun run check:publication-preflight` is a separate
+absence check for the version about to publish; it fails closed when that
+version is already present. `prepublishOnly` and the publish workflow run the
+release-ref binding and this absence preflight before `bun publish`; they do
+not use a presence check as publication authorization. The live check reads
+`GH_TOKEN` for the package download and never prints it.
+
+An exact source archive may run `bun install --frozen-lockfile` and
+`bun run check` without Git history. In a full Git checkout the offline gate
+also verifies the local `v3.0.0` tag; source archives skip that assertion, and
+shallow checkouts skip it only when the historical tag is unavailable. The
+release workflow always performs the authoritative GitHub API check against
+the tag, `GITHUB_SHA`, and live default-branch head.
 
 The release workflow also requires the published release tag to be exactly
 `v<package version>` and to resolve, through the read-only GitHub contents API,
 to the live default-branch head. It compares that commit with `GITHUB_SHA`, so a
-version-matching tag made from an older commit cannot publish. Until the correct
-3.0.0 occupies its immutable registry version, an already-created tag that
-points at an older workflow cannot be repaired retroactively: exact tag
-creation, protected-tag configuration, and any temporary workflow disable are
-approval-bound remote-control steps.
+version-matching tag made from an older commit cannot publish. The exact tag,
+source commit, and workflow receipt recorded for 3.0.0 are historical evidence
+of the artifact already in the registry; they cannot be repaired retroactively
+or reused for a conflicting release.
 
 For a credential-free package-only check, run
 `bun pm pack --dry-run --ignore-scripts`; this verifies the packed contents
 without contacting the registry. A live publish uses `NPM_CONFIG_TOKEN` with a
 classic GitHub PAT that has `write:packages`. The release workflow runs the
 complete `prepublishOnly` gate, which requires a fresh complete registry
-snapshot, packs without repeating lifecycle scripts, and runs `bun publish` on
+snapshot whose target version is absent, packs without repeating lifecycle
+scripts, and runs `bun publish` on
 that reviewed tarball from a clean temporary directory with the GitHub Packages
 registry supplied explicitly. Keeping the publish process outside the source
 directory prevents the source checkout's registry-only `.npmrc` from replacing

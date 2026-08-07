@@ -377,6 +377,15 @@ describe("release and CI boundary", () => {
     expect(packageJson.scripts?.["prepublishOnly"]).toContain(
       "bun run check:publication-authority",
     );
+    expect(packageJson.scripts?.["prepublishOnly"]).toContain(
+      "bun run check:release-ref",
+    );
+    expect(packageJson.scripts?.["prepublishOnly"]).toContain(
+      "bun run check:publication-preflight",
+    );
+    expect(packageJson.scripts?.["prepublishOnly"]).not.toContain(
+      "bun run check:release-live",
+    );
   });
 
   it("locks source tests to the reviewed in-repo cail-log artifact", () => {
@@ -564,9 +573,15 @@ describe("release and CI boundary", () => {
   it("documents Bun-native GitHub Packages publishing only", () => {
     expect(readme).toContain("bun pm pack --dry-run --ignore-scripts");
     expect(readme).toContain("bun publish");
-    expect(readme).toContain("unreleased 3.0.0 candidate");
-    expect(readme).toContain("not evidence that the registry version is available");
+    expect(readme).toContain("Client 2.0.0 and 3.0.0 are present");
+    expect(readme).toMatch(/immutable published-release\s+record/u);
+    expect(readme).toMatch(/future\s+releases require a new package version/u);
     expect(readme).toMatch(/fresh complete registry\s+snapshot/u);
+    expect(readme).toMatch(/known artifact defect/u);
+    expect(readme).toMatch(/next-release cleanup/u);
+    expect(readme).toMatch(/check:publication-preflight/u);
+    expect(readme).toMatch(/check:release-live/u);
+    expect(readme).toMatch(/shallow checkouts skip/u);
     expect(readme).toContain("cannot be repaired retroactively");
     expect(readme).not.toContain("npm publish");
     expect(readme).not.toMatch(/Bun .*cannot authenticate/i);
