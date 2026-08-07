@@ -381,8 +381,12 @@ Successful responses are returned by reference. The caller owns consuming and
 cancelling a streaming response body when its browser request, Worker request,
 or server connection closes. The client imposes no size limit on successful
 model or SSE bodies because it does not consume them. Direct error and quota
-bodies are limited to 64 KiB before parsing. `extractCailError()` refuses
-already-buffered SDK JSON strings over 256 KiB.
+bodies are limited to 64 KiB before parsing. `getCatalogSnapshot()` consumes
+the public catalog through a separate 8 MiB byte bound, matching the Gateway's
+source-owned response-byte ceiling; an oversized catalog is cancelled and
+fails closed as `CailError { code: "unknown_error" }`. That transport bound is
+separate from the standalone in-memory `parseCailModelCatalog()` schema limits.
+`extractCailError()` refuses already-buffered SDK JSON strings over 256 KiB.
 
 ## Quota read-through
 
