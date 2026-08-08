@@ -29,25 +29,28 @@ describe("public catalog and quota parsers", () => {
     expect(() => parseCailModelCatalog({ object: "list", data: [{ ...model, provider: "private" }] })).toThrow(CailError);
   });
 
-  it("accepts canonical quota values and rejects shape drift", () => {
+  it("accepts the Cloudflare estimate and rejects shape drift", () => {
     const quota = parseCailQuotaSnapshot({
       object: "quota",
-      subject: "app-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      managed_by: "cloudflare",
+      state: "estimated",
       unit: "microdollar",
       currency: "USD",
       limit: 1_000,
-      used: 200,
-      remaining: 800,
-      reset: null,
+      estimated_used: 200,
+      estimated_remaining: 800,
+      used_percent: 20,
+      remaining_percent: 80,
       window_technique: "fixed",
       window_seconds: 60,
-      state: "ok",
-      enforced: true,
-      as_of: 1_720_600_000,
+      calculated_at: 1_720_600_000,
     });
-    expect(quota.remaining).toBe(800);
-    expect(() => parseCailQuotaSnapshot({ ...quota, remaining: 1 })).toThrow(CailError);
-    expect(() => parseCailQuotaSnapshot({ ...quota, subject: "not-a-subject" })).toThrow(CailError);
+    expect(quota).toMatchObject({ object: "quota", estimated_remaining: 800 });
+    expect(() => parseCailQuotaSnapshot({ ...quota, estimated_remaining: 1 })).toThrow(CailError);
+    expect(() => parseCailQuotaSnapshot({ ...quota, remaining_percent: 1 })).toThrow(CailError);
+    expect(() => parseCailQuotaSnapshot({ ...quota, used_percent: 19, remaining_percent: 81 })).toThrow(CailError);
+    expect(() => parseCailQuotaSnapshot({ ...quota, used: 200 } as unknown)).toThrow(CailError);
+    expect(() => parseCailQuotaSnapshot({ ...quota, subject: "app-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } as unknown)).toThrow(CailError);
   });
 
   it("rejects sparse, accessor, trapped, and oversized catalog arrays without reading getters", () => {
@@ -105,21 +108,21 @@ describe("public catalog and quota parsers", () => {
     let getterCalled = false;
     const validQuota = {
       object: "quota",
-      subject: "app-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      managed_by: "cloudflare",
+      state: "estimated",
       unit: "microdollar",
       currency: "USD",
       limit: 1_000,
-      used: 200,
-      remaining: 800,
-      reset: null,
+      estimated_used: 200,
+      estimated_remaining: 800,
+      used_percent: 20,
+      remaining_percent: 80,
       window_technique: "fixed",
       window_seconds: 60,
-      state: "ok",
-      enforced: true,
-      as_of: 1_720_600_000,
+      calculated_at: 1_720_600_000,
     };
     const hostile = { ...validQuota } as Record<string, unknown>;
-    Object.defineProperty(hostile, "remaining", {
+    Object.defineProperty(hostile, "estimated_remaining", {
       enumerable: true,
       get() {
         getterCalled = true;
@@ -134,6 +137,6 @@ describe("public catalog and quota parsers", () => {
         throw new Error("quota get trap");
       },
     });
-    expect(parseCailQuotaSnapshot(trapped)).toMatchObject({ remaining: 800 });
+    expect(parseCailQuotaSnapshot(trapped)).toMatchObject({ estimated_remaining: 800 });
   });
 });

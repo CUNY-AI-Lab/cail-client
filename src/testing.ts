@@ -57,29 +57,23 @@ export function quotaExceededResponse(options: QuotaExceededEnvelopeOptions = {}
   });
 }
 
-export const TEST_QUOTA_SUBJECT = "cail-0123456789abcdef0123456789abcdef";
-
-export type CailQuotaSnapshotBody = CailQuotaSnapshot & {
-  object: "quota";
-  unit: "microdollar";
-  currency: "USD";
-};
+export type CailQuotaSnapshotBody = CailQuotaSnapshot;
 
 export function quotaSnapshotBody(overrides: Partial<CailQuotaSnapshot> = {}): CailQuotaSnapshotBody {
   return {
     object: "quota",
-    subject: TEST_QUOTA_SUBJECT,
+    managed_by: "cloudflare",
+    state: "estimated",
     unit: "microdollar",
     currency: "USD",
     limit: 10_000_000,
-    used: 630_000,
-    remaining: 9_370_000,
-    reset: 1_723_200_000,
-    window_technique: "sliding",
+    estimated_used: 630_000,
+    estimated_remaining: 9_370_000,
+    used_percent: 6,
+    remaining_percent: 94,
     window_seconds: 2_592_000,
-    state: "ok",
-    enforced: true,
-    as_of: 1_720_600_000,
+    window_technique: "sliding",
+    calculated_at: 1_720_600_000,
     ...overrides,
   };
 }

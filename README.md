@@ -2,7 +2,7 @@
 
 Small Web-standard helpers for the CAIL Gateway's CAIL-native extensions. The
 package owns bounded CAIL error extraction, the public model catalog, the
-authenticated quota snapshot, and the buffered `POST /v1/run` extension. It
+authenticated Cloudflare quota estimate, and the buffered `POST /v1/run` extension. It
 does not implement an OpenAI-compatible model client. Use the official OpenAI
 or AI SDK client for ordinary model requests.
 
@@ -83,10 +83,11 @@ const catalog = await cail.getCatalogSnapshot({ modality: "all" });
 const quota = await cail.getQuota(cailToken);
 ```
 
-`getQuota()` sends an authenticated `GET /quota` and validates the canonical
-subject, units, safe integer fields, window, state, and remaining relationship.
-Malformed successful bodies fail closed as `CailError` with
-`code: "unknown_error"`.
+`getQuota()` sends an authenticated `GET /quota` and validates the exact
+Cloudflare-managed estimate: microdollar amounts, whole-number percentages,
+window metadata, and calculation time. It returns observed usage only; it does
+not claim an authoritative remaining balance or reset time. Malformed successful
+bodies fail closed as `CailError` with `code: "unknown_error"`.
 
 ## Errors
 
@@ -115,7 +116,8 @@ walks bounded, already-buffered wrapper layers such as `cause`, `error`,
 ## Testing fixtures
 
 The optional `@cuny-ai-lab/cail-client/testing` subpath contains pure fixtures
-for CAIL envelopes and quota snapshots. It has no test-framework dependency.
+for CAIL envelopes and Cloudflare quota estimates. It has no test-framework
+dependency.
 
 ## Development and publication
 

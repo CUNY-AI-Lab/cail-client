@@ -92,11 +92,14 @@ describe("fixed extension routes", () => {
     expect(recorded.calls[0]?.init).toMatchObject({ redirect: "error", credentials: "omit" });
   });
 
-  it("parses the bounded authenticated quota snapshot", async () => {
+  it("parses the bounded authenticated Cloudflare estimate", async () => {
     const recorded = client(quotaSnapshotResponse());
     await expect(recorded.client.getQuota("trusted-token")).resolves.toMatchObject({
-      subject: "cail-0123456789abcdef0123456789abcdef",
-      remaining: 9_370_000,
+      object: "quota",
+      managed_by: "cloudflare",
+      state: "estimated",
+      estimated_remaining: 9_370_000,
+      remaining_percent: 94,
     });
     expect(recorded.calls[0]?.url).toBe(`${BASE}/quota`);
     expect(new Headers(recorded.calls[0]?.init.headers).get("authorization")).toBe("Bearer trusted-token");

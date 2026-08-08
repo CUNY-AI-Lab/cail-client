@@ -1,5 +1,19 @@
 import { boundedBodyError } from "./errors.js";
-const SUBJECT = /^(?:cail|app)-[0-9a-f]{32}$/;
+const KEYS = new Set([
+    "object",
+    "managed_by",
+    "state",
+    "unit",
+    "currency",
+    "limit",
+    "estimated_used",
+    "estimated_remaining",
+    "used_percent",
+    "remaining_percent",
+    "window_seconds",
+    "window_technique",
+    "calculated_at",
+]);
 function own(value, key) {
     try {
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
@@ -12,6 +26,14 @@ function own(value, key) {
 function integer(value) {
     return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
+function hasOnlyExpectedKeys(value) {
+    try {
+        return Object.getOwnPropertyNames(value).every((key) => KEYS.has(key));
+    }
+    catch {
+        return false;
+    }
+}
 export function parseCailQuotaSnapshot(value, status = 200) {
     let array = false;
     try {
@@ -20,43 +42,57 @@ export function parseCailQuotaSnapshot(value, status = 200) {
     catch {
         array = true;
     }
-    if (value === null || typeof value !== "object" || array) {
+    if (value === null || typeof value !== "object" || array || !hasOnlyExpectedKeys(value)) {
         throw boundedBodyError(status, "quota");
     }
     const object = own(value, "object");
-    const subject = own(value, "subject");
+    const managedBy = own(value, "managed_by");
+    const state = own(value, "state");
     const unit = own(value, "unit");
     const currency = own(value, "currency");
-    const enforced = own(value, "enforced");
     const limit = own(value, "limit");
-    const used = own(value, "used");
-    const remaining = own(value, "remaining");
-    const reset = own(value, "reset");
-    const windowTechnique = own(value, "window_technique");
+    const estimatedUsed = own(value, "estimated_used");
+    const estimatedRemaining = own(value, "estimated_remaining");
+    const usedPercent = own(value, "used_percent");
+    const remainingPercent = own(value, "remaining_percent");
     const windowSeconds = own(value, "window_seconds");
-    const state = own(value, "state");
-    const asOf = own(value, "as_of");
+    const windowTechnique = own(value, "window_technique");
+    const calculatedAt = own(value, "calculated_at");
     if (object !== "quota" ||
-        typeof subject !== "string" || !SUBJECT.test(subject) ||
-        unit !== "microdollar" || currency !== "USD" || typeof enforced !== "boolean" ||
-        !integer(limit) || !integer(used) || !integer(remaining) ||
-        (reset !== null && !integer(reset)) ||
+        managedBy !== "cloudflare" ||
+        state !== "estimated" ||
+        unit !== "microdollar" ||
+        currency !== "USD" ||
+        !integer(limit) ||
+        limit === 0 ||
+        !integer(estimatedUsed) ||
+        !integer(estimatedRemaining) ||
+        !integer(usedPercent) ||
+        usedPercent > 100 ||
+        !integer(remainingPercent) ||
+        remainingPercent > 100 ||
+        !integer(windowSeconds) ||
+        windowSeconds === 0 ||
         (windowTechnique !== "fixed" && windowTechnique !== "sliding") ||
-        !integer(windowSeconds) || windowSeconds === 0 ||
-        (state !== "ok" && state !== "stale") ||
-        !integer(asOf) || limit === 0 || remaining !== Math.max(0, limit - used)) {
+        !integer(calculatedAt) ||
+        estimatedRemaining !== Math.max(0, limit - estimatedUsed) ||
+        usedPercent !== Math.min(100, Math.max(0, Math.round((estimatedUsed / limit) * 100))) ||
+        remainingPercent !== 100 - usedPercent) {
         throw boundedBodyError(status, "quota");
     }
     return {
-        subject,
-        limit,
-        used,
-        remaining,
-        reset,
-        window_technique: windowTechnique,
-        window_seconds: windowSeconds,
+        object,
+        managed_by: managedBy,
         state,
-        enforced,
-        as_of: asOf,
+        unit,
+        currency,
+        limit,
+        estimated_used: estimatedUsed,
+        estimated_remaining: estimatedRemaining,
+        used_percent: usedPercent,
+        remaining_percent: remainingPercent,
+        window_seconds: windowSeconds,
+        window_technique: windowTechnique,
+        calculated_at: calculatedAt,
     };
 }
