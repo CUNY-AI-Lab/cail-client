@@ -45,4 +45,4 @@ jobs:
           test -n "$tarball"
           bun publish --registry=https://npm.pkg.github.com "$tarball"
         env:
-          NPM_CONFIG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
