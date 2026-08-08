@@ -1,18 +1,21 @@
 export type CailQuotaWindowTechnique = "fixed" | "sliding";
-export type CailQuotaState = "ok" | "stale";
+export type CailQuotaState = "estimated";
 export interface CailQuota {
-    limit: number;
-    used: number;
-    remaining: number;
-    reset: number | null;
-    window_technique: CailQuotaWindowTechnique;
-    window_seconds: number;
+    object: "quota";
+    managed_by: "cloudflare";
     state: CailQuotaState;
+    unit: "microdollar";
+    currency: "USD";
+    limit: number;
+    estimated_used: number;
+    estimated_remaining: number;
+    used_percent: number;
+    remaining_percent: number;
+    window_seconds: number;
+    window_technique: CailQuotaWindowTechnique;
+    calculated_at: number;
 }
 export interface CailQuotaSnapshot extends CailQuota {
-    subject: string;
-    enforced: boolean;
-    as_of: number;
 }
 export declare function parseCailQuotaSnapshot(value: unknown, status?: number): CailQuotaSnapshot;
 //# sourceMappingURL=quota.d.ts.map
