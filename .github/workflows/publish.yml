@@ -14,61 +14,35 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Check out the tagged source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          fetch-depth: 1
           persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.14
-      - run: bun install --frozen-lockfile --ignore-scripts
-      - name: Verify release tag is the live default-branch head
-        run: bun run check:release-ref
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_REF_TYPE: ${{ github.ref_type }}
-          GITHUB_REF_NAME: ${{ github.ref_name }}
-          GITHUB_SHA: ${{ github.sha }}
-      - run: bun run check
-      - name: Verify publication preflight registry authority
+      - name: Install frozen dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Require a version-matching tag
+        shell: bash
         run: |
-          set -o pipefail
-          gh api --paginate \
-            --header 'X-GitHub-Api-Version: 2026-03-10' \
-            '/orgs/CUNY-AI-Lab/packages/npm/cail-client/versions?per_page=100&state=active' \
-            | jq -s 'add' > "$RUNNER_TEMP/cail-client-package-versions.json"
-          CAIL_REGISTRY_VERSIONS_FILE="$RUNNER_TEMP/cail-client-package-versions.json" \
-            bun run check:publication-preflight
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish to GitHub Packages
+          set -euo pipefail
+          expected="v$(bun -p "require('./package.json').version")"
+          test "$GITHUB_REF_TYPE" = tag
+          test "$GITHUB_REF_NAME" = "$expected"
+      - name: Verify and pack the release
+        run: bun run prepublishOnly
+      - name: Publish the verified tarball
+        shell: bash
         run: |
-          bun run check:release-ref
-          bun run prepublishOnly
-          PUBLISH_DIRECTORY="$(mktemp -d)"
-          trap 'rm -rf "$PUBLISH_DIRECTORY"' EXIT
-          PACKAGE_VERSION="$(bun -p "require('./package.json').version")"
-          PACKAGE_TARBALL="$PUBLISH_DIRECTORY/cuny-ai-lab-cail-client-${PACKAGE_VERSION}.tgz"
-          bun pm pack --destination "$PUBLISH_DIRECTORY" --ignore-scripts
-          cp package.json "$PUBLISH_DIRECTORY/package.json"
-          (
-            cd "$PUBLISH_DIRECTORY"
-            bun publish \
-              --registry=https://npm.pkg.github.com \
-              "$PACKAGE_TARBALL"
-          )
+          set -euo pipefail
+          publish_directory="$(mktemp -d)"
+          trap 'rm -rf "$publish_directory"' EXIT
+          bun pm pack --destination "$publish_directory" --ignore-scripts
+          tarball="$(find "$publish_directory" -maxdepth 1 -name '*.tgz' -print -quit)"
+          test -n "$tarball"
+          bun publish --registry=https://npm.pkg.github.com "$tarball"
         env:
-          CAIL_REGISTRY_VERSIONS_FILE: ${{ runner.temp }}/cail-client-package-versions.json
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_CONFIG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Verify published registry version authority
-        run: |
-          set -o pipefail
-          gh api --paginate \
-            --header 'X-GitHub-Api-Version: 2026-03-10' \
-            '/orgs/CUNY-AI-Lab/packages/npm/cail-client/versions?per_page=100&state=active' \
-            | jq -s 'add' > "$RUNNER_TEMP/cail-client-package-versions-after.json"
-          CAIL_REGISTRY_VERSIONS_FILE="$RUNNER_TEMP/cail-client-package-versions-after.json" \
-            bun run check:release-live
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

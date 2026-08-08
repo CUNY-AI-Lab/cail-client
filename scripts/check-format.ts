@@ -9,7 +9,6 @@ const textAuthorities = [
   "LICENSE",
   "README.md",
   "bun.lock",
-  "contract",
   "dist",
   "package.json",
   "scripts",
@@ -18,11 +17,6 @@ const textAuthorities = [
   "tsconfig.build.json",
   "tsconfig.json",
   "tsconfig.test.json",
-  "vendor/cail-log-0.6.0.authority.json",
-  "vendor/cail-client-2.0.1.release-authority.json",
-  "vendor/cail-client-3.0.0.release-authority.json",
-  "vendor/cail-client-3.0.1.release-authority.json",
-  "vendor/cail-client-3.0.2.release-authority.json",
   "vitest.config.ts",
 ];
 const failures: string[] = [];

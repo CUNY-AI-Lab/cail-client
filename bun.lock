@@ -4,20 +4,14 @@
   "workspaces": {
     "": {
       "name": "@cuny-ai-lab/cail-client",
-      "dependencies": {
-        "@cuny-ai-lab/cail-log": "0.6.0",
-      },
       "devDependencies": {
         "@types/node": "^20.17.6",
-        "postcss": "8.5.25",
         "typescript": "^5.6.3",
         "vitest": "4.1.10",
       },
     },
   },
   "packages": {
-    "@cuny-ai-lab/cail-log": ["@cuny-ai-lab/cail-log@vendor/cuny-ai-lab-cail-log-0.6.0.tgz", {}],
-
     "@emnapi/core": ["@emnapi/core@2.0.0-alpha.3", "", { "dependencies": { "@emnapi/wasi-threads": "2.0.1", "tslib": "^2.4.0" } }, "sha512-AZypUeJ/yByuxyS7BlSNRDOMLMlROYtjYdIAuBmJssVz1UJDSeYxLrdizhXCFYhedC5bqd/ASy8EuNXbVVXp9g=="],
 
     "@emnapi/runtime": ["@emnapi/runtime@2.0.0-alpha.3", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-hFPAhMUjJD9BSyCANEISPOogeXC9Zo9ZQl7L6vKnaVsMkCtzznaW/naYypeyl0Gv5rYfWYsZbpixTMpjDJzQeA=="],
