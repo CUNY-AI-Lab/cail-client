@@ -1,4 +1,4 @@
-import { boundedBodyError } from "./errors.js";
+import { bodyError } from "./errors.js";
 
 export type CailQuotaWindowTechnique = "fixed" | "sliding";
 export type CailQuotaState = "estimated";
@@ -66,7 +66,7 @@ export function parseCailQuotaSnapshot(value: unknown, status = 200): CailQuotaS
     array = true;
   }
   if (value === null || typeof value !== "object" || array || !hasOnlyExpectedKeys(value)) {
-    throw boundedBodyError(status, "quota");
+    throw bodyError(status, "quota");
   }
 
   const object = own(value, "object");
@@ -105,7 +105,7 @@ export function parseCailQuotaSnapshot(value: unknown, status = 200): CailQuotaS
     usedPercent !== Math.min(100, Math.max(0, Math.round((estimatedUsed / limit) * 100))) ||
     remainingPercent !== 100 - usedPercent
   ) {
-    throw boundedBodyError(status, "quota");
+    throw bodyError(status, "quota");
   }
 
   return {

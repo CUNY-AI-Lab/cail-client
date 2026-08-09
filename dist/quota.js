@@ -1,4 +1,4 @@
-import { boundedBodyError } from "./errors.js";
+import { bodyError } from "./errors.js";
 const KEYS = new Set([
     "object",
     "managed_by",
@@ -43,7 +43,7 @@ export function parseCailQuotaSnapshot(value, status = 200) {
         array = true;
     }
     if (value === null || typeof value !== "object" || array || !hasOnlyExpectedKeys(value)) {
-        throw boundedBodyError(status, "quota");
+        throw bodyError(status, "quota");
     }
     const object = own(value, "object");
     const managedBy = own(value, "managed_by");
@@ -78,7 +78,7 @@ export function parseCailQuotaSnapshot(value, status = 200) {
         estimatedRemaining !== Math.max(0, limit - estimatedUsed) ||
         usedPercent !== Math.min(100, Math.max(0, Math.round((estimatedUsed / limit) * 100))) ||
         remainingPercent !== 100 - usedPercent) {
-        throw boundedBodyError(status, "quota");
+        throw bodyError(status, "quota");
     }
     return {
         object,

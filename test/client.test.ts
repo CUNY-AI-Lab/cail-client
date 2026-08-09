@@ -3,6 +3,7 @@ import { CailError, createCailClient } from "../src/index.js";
 import { cailErrorResponse, quotaSnapshotResponse } from "../src/testing.js";
 
 const BASE = "https://gateway.example/api";
+const CHAT = `${BASE}/v1/chat/completions`;
 
 function wire(response: Response | Error): {
   fetch: typeof fetch;
@@ -25,32 +26,30 @@ function client(response: Response | Error) {
   };
 }
 
-describe("fixed extension routes", () => {
-  it("rejects unsafe base URL authority and delimiters", () => {
+describe("CAIL Gateway transport", () => {
+  it("validates the authority and permits explicit loopback HTTP", () => {
     for (const baseUrl of [
       "http://gateway.example",
       "https://user:pass@gateway.example",
-      "https://gateway.example?",
       "https://gateway.example?mode=test",
-      "https://gateway.example#",
       "https://gateway.example#fragment",
     ]) {
-      expect(() =>
-        createCailClient({ baseUrl, app: "test-app", fetchImpl: vi.fn() }),
-      ).toThrow(CailError);
+      expect(() => createCailClient({ baseUrl, app: "test-app", fetchImpl: vi.fn() })).toThrow(CailError);
     }
+    expect(() => createCailClient({
+      baseUrl: "http://localhost:8787",
+      app: "test-app",
+      allowInsecureLoopback: true,
+      fetchImpl: vi.fn(),
+    })).not.toThrow();
   });
 
-  it("sends one bearer string and fixed transport safety options", async () => {
+  it("sends one bearer credential, app attribution, and Web transport safeguards", async () => {
     const recorded = client(new Response(JSON.stringify({ ok: true }), { status: 200 }));
     await recorded.client.run({ model: "@cf/example/model", input: { prompt: "hello" } }, "trusted-token");
     expect(recorded.calls).toHaveLength(1);
     expect(recorded.calls[0]?.url).toBe(`${BASE}/v1/run`);
-    expect(recorded.calls[0]?.init).toMatchObject({
-      method: "POST",
-      redirect: "error",
-      credentials: "omit",
-    });
+    expect(recorded.calls[0]?.init).toMatchObject({ method: "POST", redirect: "error", credentials: "omit" });
     const headers = new Headers(recorded.calls[0]?.init.headers);
     expect(headers.get("authorization")).toBe("Bearer trusted-token");
     expect(headers.get("x-cail-app")).toBe("test-app");
@@ -61,177 +60,186 @@ describe("fixed extension routes", () => {
     });
   });
 
-  it("does not retry a failed run and keeps the token out of the error", async () => {
-    const token = "secret-token-value";
-    const recorded = client(cailErrorResponse(503, {
+  it("uses the identity header for JWT credentials and strips caller auth", async () => {
+    const recorded = client(new Response("ok", { status: 200 }));
+    await recorded.client.call(
+      "/v1/models",
+      { method: "GET", headers: { Authorization: "sdk-placeholder", "X-CAIL-Identity-JWT": "wrong" } },
+      { kind: "jwt", token: "trusted-jwt" },
+    );
+    const headers = new Headers(recorded.calls[0]?.init.headers);
+    expect(headers.get("x-cail-identity-jwt")).toBe("trusted-jwt");
+    expect(headers.get("authorization")).toBeNull();
+    expect(headers.get("x-cail-app")).toBe("test-app");
+  });
+
+  it("passes metadata and correlation as validated CAIL headers", async () => {
+    const recorded = client(new Response("ok", { status: 200 }));
+    await recorded.client.call(
+      "/v1/models",
+      { method: "GET", headers: { "X-CAIL-Metadata": JSON.stringify({ existing: "yes" }) } },
+      "key-token",
+      {
+        metadata: { added: 2 },
+        correlation: {
+          trace_id: "0123456789abcdef0123456789abcdef",
+          span_id: "0123456789abcdef",
+          trace_flags: 1,
+          request_id: "019f8bdc-342a-76e1-ba71-005d69808f86",
+        },
+      },
+    );
+    const headers = new Headers(recorded.calls[0]?.init.headers);
+    expect(JSON.parse(headers.get("x-cail-metadata") ?? "")).toEqual({ existing: "yes", added: 2 });
+    expect(headers.get("traceparent")).toBe("00-0123456789abcdef0123456789abcdef-0123456789abcdef-01");
+    expect(headers.get("x-cail-request-id")).toBe("019f8bdc-342a-76e1-ba71-005d69808f86");
+  });
+
+  it("keeps native and OpenAI-shaped request bodies as simple pass-through JSON", async () => {
+    const recorded = client(new Response("ok", { status: 200 }));
+    await recorded.client.chatCompletions({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+      provider_specific_option: { retained: true },
+    }, "key-token");
+    expect(recorded.calls[0]?.url).toBe(`${BASE}/v1/chat/completions`);
+    expect(await new Response(recorded.calls[0]?.init.body).json()).toEqual({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+      provider_specific_option: { retained: true },
+    });
+  });
+
+  it("adapts chat SDK fetches without buffering successful responses or retrying", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const response = new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    const recorded = client(response);
+    const adapter = recorded.client.chatFetch({ kind: "jwt", token: "trusted-jwt" });
+    const returned = await adapter(CHAT, {
+      method: "POST",
+      headers: { Authorization: "sdk-placeholder", "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", messages: [] }),
+    });
+    expect(returned).toBe(response);
+    expect(recorded.calls).toHaveLength(1);
+    const headers = new Headers(recorded.calls[0]?.init.headers);
+    expect(headers.get("authorization")).toBeNull();
+    expect(headers.get("x-cail-identity-jwt")).toBe("trusted-jwt");
+    expect(await new Response(recorded.calls[0]?.init.body).json()).toMatchObject({ model: "gpt-test" });
+    await expect(returned.text()).resolves.toContain("[DONE]");
+  });
+
+  it("throws only Gateway-declared non-retryable chat failures by default", async () => {
+    const response = cailErrorResponse(503, {
       error: {
         message: "provider unavailable",
         type: "server_error",
         param: null,
         code: "provider_unavailable",
       },
-    }));
-    await expect(recorded.client.run({ model: "m", input: {} }, token)).rejects.toMatchObject({
+    }, { "x-should-retry": "false" });
+    const recorded = client(response);
+    const adapter = recorded.client.chatFetch("key-token");
+    await expect(adapter(CHAT, { method: "POST", body: "{}" })).rejects.toMatchObject({
       code: "provider_unavailable",
       status: 503,
     });
     expect(recorded.calls).toHaveLength(1);
-    await expect(recorded.client.run({ model: "m", input: {} }, "bad token\n")).rejects.toMatchObject({
-      code: "invalid_credential",
-      status: 0,
+  });
+
+  it("can return retryable chat failures for SDKs that honor retry headers", async () => {
+    const response = new Response(JSON.stringify({ error: { message: "busy" } }), {
+      status: 503,
+      headers: { "x-should-retry": "true" },
     });
+    const recorded = client(response);
+    const adapter = recorded.client.chatFetch("key-token", { nonRetryableErrorMode: "return" });
+    await expect(adapter(CHAT, { method: "POST", body: "{}" })).resolves.toBe(response);
+    expect(recorded.calls).toHaveLength(1);
   });
 
-  it("keeps public catalog requests free of auth and app headers", async () => {
-    const recorded = client(new Response(JSON.stringify({ object: "list", data: [] }), { status: 200 }));
-    await recorded.client.getCatalog({ modality: "all" });
-    const headers = new Headers(recorded.calls[0]?.init.headers);
-    expect(recorded.calls[0]?.url).toBe(`${BASE}/v1/catalog?modality=all`);
-    expect(headers.get("authorization")).toBeNull();
-    expect(headers.get("x-cail-app")).toBeNull();
-    expect(recorded.calls[0]?.init).toMatchObject({ redirect: "error", credentials: "omit" });
+  it("still invokes the authentication hook when raw chat errors are returned", async () => {
+    const response = cailErrorResponse(401, {
+      error: {
+        message: "Sign-in required",
+        type: "authentication_error",
+        param: null,
+        code: "authentication_required",
+      },
+    });
+    const recorded = wire(response);
+    const onAuthRequired = vi.fn();
+    const clientWithHook = createCailClient({
+      baseUrl: BASE,
+      app: "test-app",
+      fetchImpl: recorded.fetch,
+      onAuthRequired,
+    });
+    const returned = await clientWithHook.chatFetch("key-token", { nonRetryableErrorMode: "return" })(CHAT, {
+      method: "POST",
+      body: "{}",
+    });
+    expect(returned).toBe(response);
+    expect(onAuthRequired).toHaveBeenCalledOnce();
   });
 
-  it("parses the bounded authenticated Cloudflare estimate", async () => {
-    const recorded = client(quotaSnapshotResponse());
-    await expect(recorded.client.getQuota("trusted-token")).resolves.toMatchObject({
+  it("invokes the authentication hook without masking the Gateway error", async () => {
+    const response = cailErrorResponse(401, {
+      error: {
+        message: "Sign-in required",
+        type: "authentication_error",
+        param: null,
+        code: "authentication_required",
+      },
+    }, { "x-should-retry": "false" });
+    const recorded = wire(response);
+    const onAuthRequired = vi.fn(() => {
+      throw new Error("hook detail");
+    });
+    const clientWithHook = createCailClient({
+      baseUrl: BASE,
+      app: "test-app",
+      fetchImpl: recorded.fetch,
+      onAuthRequired,
+    });
+    await expect(clientWithHook.call("/v1/models", { method: "GET" }, "key-token")).rejects.toMatchObject({
+      code: "authentication_required",
+      status: 401,
+    });
+    expect(onAuthRequired).toHaveBeenCalledOnce();
+  });
+
+  it("keeps public catalog requests free of auth and app headers and validates quota", async () => {
+    const catalog = client(new Response(JSON.stringify({ object: "list", data: [] }), { status: 200 }));
+    await catalog.client.getCatalog({ modality: "all" });
+    const catalogHeaders = new Headers(catalog.calls[0]?.init.headers);
+    expect(catalog.calls[0]?.url).toBe(`${BASE}/v1/catalog?modality=all`);
+    expect(catalogHeaders.get("authorization")).toBeNull();
+    expect(catalogHeaders.get("x-cail-app")).toBeNull();
+
+    const quota = client(quotaSnapshotResponse());
+    await expect(quota.client.getQuota("trusted-token")).resolves.toMatchObject({
       object: "quota",
       managed_by: "cloudflare",
       state: "estimated",
       estimated_remaining: 9_370_000,
       remaining_percent: 94,
     });
-    expect(recorded.calls[0]?.url).toBe(`${BASE}/quota`);
-    expect(new Headers(recorded.calls[0]?.init.headers).get("authorization")).toBe("Bearer trusted-token");
   });
 
-  it("preserves caller abort reasons and wraps transport failures safely", async () => {
-    const reason = new Error("caller abort");
+  it("does not retry failed requests and never includes credentials in transport errors", async () => {
+    const token = "secret-token-value";
     const recorded = client(new Error("private transport detail"));
-    await expect(recorded.client.getQuota("token")).rejects.toMatchObject({ code: "network_error", status: 0 });
-    expect(JSON.stringify(await recorded.client.getQuota("token").catch((error: unknown) => error))).not.toContain("private transport detail");
-    const controller = new AbortController();
-    controller.abort(reason);
-    const aborted = client(new Response("{}", { status: 200 }));
-    await expect(aborted.client.getQuota("token", { signal: controller.signal })).rejects.toBe(reason);
-  });
-
-  it("serializes descriptor data without invoking object or array hooks", async () => {
-    const recorded = client(new Response("ok", { status: 200 }));
-    const originalObjectToJson = Object.getOwnPropertyDescriptor(Object.prototype, "toJSON");
-    const originalArrayToJson = Object.getOwnPropertyDescriptor(Array.prototype, "toJSON");
-    const objectToJson = vi.fn(() => {
-      throw new Error("Object.prototype.toJSON must not run");
-    });
-    const arrayToJson = vi.fn(() => {
-      throw new Error("Array.prototype.toJSON must not run");
-    });
-    Object.defineProperty(Object.prototype, "toJSON", {
-      configurable: true,
-      enumerable: false,
-      value: objectToJson,
-      writable: true,
-    });
-    Object.defineProperty(Array.prototype, "toJSON", {
-      configurable: true,
-      enumerable: false,
-      value: arrayToJson,
-      writable: true,
-    });
-    let proxyToJsonCalled = false;
-    const nested = new Proxy({ answer: 42 }, {
-      get(target, key, receiver) {
-        if (key === "toJSON") {
-          proxyToJsonCalled = true;
-          throw new Error("proxy toJSON must not run");
-        }
-        return Reflect.get(target, key, receiver);
-      },
-    });
-    try {
-      await recorded.client.run({ model: "m", input: { nested, values: [1, 2] } }, "token");
-      expect(JSON.parse(String(recorded.calls[0]?.init.body))).toEqual({
-        model: "m",
-        input: { nested: { answer: 42 }, values: [1, 2] },
-      });
-      expect(objectToJson).not.toHaveBeenCalled();
-      expect(arrayToJson).not.toHaveBeenCalled();
-      expect(proxyToJsonCalled).toBe(false);
-    } finally {
-      if (originalObjectToJson === undefined) delete (Object.prototype as { toJSON?: unknown }).toJSON;
-      else Object.defineProperty(Object.prototype, "toJSON", originalObjectToJson);
-      if (originalArrayToJson === undefined) delete (Array.prototype as { toJSON?: unknown }).toJSON;
-      else Object.defineProperty(Array.prototype, "toJSON", originalArrayToJson);
-    }
-  });
-
-  it("rejects descriptor-hostile, cyclic, deep, and oversized inputs", async () => {
-    const recorded = client(new Response("ok", { status: 200 }));
-    const invalidInput = async (input: unknown) => {
-      await expect(recorded.client.run({ model: "m", input: input as Record<string, unknown> }, "token"))
-        .rejects.toMatchObject({ code: "invalid_request", status: 0 });
-    };
-
-    let getterCalled = false;
-    const accessor = {} as Record<string, unknown>;
-    Object.defineProperty(accessor, "value", {
-      enumerable: true,
-      get() {
-        getterCalled = true;
-        throw new Error("input getter must not run");
-      },
-    });
-    await invalidInput({ accessor });
-    expect(getterCalled).toBe(false);
-
-    const sparse: unknown[] = [];
-    sparse.length = 1;
-    await invalidInput({ sparse });
-    const accessorArray: unknown[] = [];
-    Object.defineProperty(accessorArray, "0", {
-      enumerable: true,
-      get() {
-        getterCalled = true;
-        throw new Error("array getter must not run");
-      },
-    });
-    accessorArray.length = 1;
-    await invalidInput({ accessorArray });
-    await invalidInput({ oversized: new Array(10_001) });
-
-    const trapped = new Proxy({ value: 1 }, {
-      ownKeys() {
-        throw new Error("proxy ownKeys");
-      },
-    });
-    await invalidInput({ trapped });
-
-    const cycle: Record<string, unknown> = {};
-    cycle.self = cycle;
-    await invalidInput({ cycle });
-    let deep: Record<string, unknown> = {};
-    const deepRoot = deep;
-    for (let index = 0; index < 40; index += 1) {
-      const child: Record<string, unknown> = {};
-      deep.next = child;
-      deep = child;
-    }
-    await invalidInput(deepRoot);
-
-    const many: Record<string, unknown> = {};
-    for (let index = 0; index < 10_001; index += 1) many[`key_${index}`] = index;
-    await invalidInput(many);
-    await invalidInput({ large: "x".repeat(1024 * 1024) });
-  });
-
-  it("rejects non-ASCII bearer tokens before constructing headers", async () => {
-    const recorded = client(new Response("ok", { status: 200 }));
-    for (const token of ["token🙂", "token\u200b", "token\n"] as unknown[]) {
-      await expect(recorded.client.getQuota(token as string)).rejects.toMatchObject({
-        code: "invalid_credential",
-        status: 0,
-      });
-    }
-    expect(recorded.calls).toHaveLength(0);
+    await expect(recorded.client.getQuota(token)).rejects.toMatchObject({ code: "network_error", status: 0 });
+    expect(recorded.calls).toHaveLength(1);
+    await expect(recorded.client.getQuota(token).catch((error: unknown) => error)).resolves.not.toHaveProperty("cause", "private transport detail");
+    await expect(recorded.client.getQuota("bad token\n")).rejects.toMatchObject({ code: "invalid_credential", status: 0 });
   });
 });

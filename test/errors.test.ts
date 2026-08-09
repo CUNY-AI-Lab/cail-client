@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CailError, extractCailError, parseCailError } from "../src/index.js";
 import { cailErrorEnvelope, cailErrorResponse } from "../src/testing.js";
 
-describe("bounded CAIL errors", () => {
+describe("CAIL errors", () => {
   it("preserves the typed envelope while copying safe extras", async () => {
     const response = cailErrorResponse(429, cailErrorEnvelope({
       message: "Budget exhausted.",
@@ -19,7 +19,7 @@ describe("bounded CAIL errors", () => {
     expect(error.extras).toMatchObject({ retry_after_seconds: 60, should_retry: false });
   });
 
-  it("fails closed for oversized or malformed bodies without echoing them", async () => {
+  it("fails closed for malformed bodies without echoing them", async () => {
     const secret = "PRIVATE_BODY_SECRET";
     const oversized = new Response(secret + "x".repeat(70_000), { status: 502 });
     const error = await parseCailError(oversized);

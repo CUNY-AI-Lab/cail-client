@@ -3,7 +3,9 @@ export {
   extractCailError,
   parseCailError,
 } from "./errors.js";
+export { parseCailModelCatalog } from "./catalog.js";
 export type {
+  CailCatalogModality,
   CailModelCatalog,
   CailModelCatalogEntry,
   CailModelModality,
@@ -11,25 +13,27 @@ export type {
   CailModelStatus,
   CailModelTier,
   CailPricingState,
-  CailCatalogModality,
 } from "./catalog.js";
-export { parseCailModelCatalog } from "./catalog.js";
+export { parseCailQuotaSnapshot } from "./quota.js";
 export type {
   CailQuota,
   CailQuotaSnapshot,
   CailQuotaState,
   CailQuotaWindowTechnique,
 } from "./quota.js";
-export { parseCailQuotaSnapshot } from "./quota.js";
-export {
-  createCailClient,
-} from "./client.js";
+export { createCailClient } from "./client.js";
 export type {
+  CailCallOptions,
   CailCatalogOptions,
+  CailChatFetchOptions,
+  CailChatRequest,
   CailClient,
   CailClientOptions,
+  CailCorrelation,
+  CailCredential,
+  CailCredentialInput,
+  CailMetadata,
   CailQuotaOptions,
-  CailRequestOptions,
   CailRunOptions,
   CailRunRequest,
 } from "./client.js";

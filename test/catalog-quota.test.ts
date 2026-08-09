@@ -53,7 +53,7 @@ describe("public catalog and quota parsers", () => {
     expect(() => parseCailQuotaSnapshot({ ...quota, subject: "app-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } as unknown)).toThrow(CailError);
   });
 
-  it("rejects sparse, accessor, trapped, and oversized catalog arrays without reading getters", () => {
+  it("rejects sparse, accessor, and trapped catalog arrays without reading getters", () => {
     let getterCalled = false;
     const accessorCapabilities: unknown[] = [];
     Object.defineProperty(accessorCapabilities, "0", {

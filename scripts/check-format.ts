@@ -9,7 +9,6 @@ const textAuthorities = [
   "LICENSE",
   "README.md",
   "bun.lock",
-  "dist",
   "package.json",
   "scripts",
   "src",
