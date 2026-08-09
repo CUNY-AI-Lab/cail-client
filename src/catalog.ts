@@ -185,6 +185,6 @@ export function parseCailModelCatalog(value: unknown, status = 200): CailModelCa
     return { object: "list", data: parsed };
   } catch (error) {
     if (error instanceof CailError) throw error;
-    throw bodyError(status, "catalog", error);
+    throw bodyError(status, "catalog");
   }
 }

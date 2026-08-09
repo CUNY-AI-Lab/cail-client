@@ -1,5 +1,5 @@
 const CONTROL_CHARACTERS = /[\x00-\x1f\x7f]/;
-const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 const liveErrors = new WeakSet<object>();
 
@@ -18,7 +18,6 @@ export class CailError extends Error {
     extras: Record<string, unknown> = {},
     type = "unknown_error",
     param: string | null = null,
-    cause?: unknown,
   ) {
     super(message);
     this.name = "CailError";
@@ -27,14 +26,6 @@ export class CailError extends Error {
     this.param = param;
     this.status = status;
     this.extras = extras;
-    if (cause !== undefined) {
-      Object.defineProperty(this, "cause", {
-        configurable: true,
-        enumerable: false,
-        value: cause,
-        writable: true,
-      });
-    }
     Object.setPrototypeOf(this, CailError.prototype);
     liveErrors.add(this);
   }
@@ -123,7 +114,7 @@ function responseMetadata(response: Response, extras: Record<string, unknown>): 
   }
 }
 
-function unknownResponse(status: number, cause?: unknown): CailError {
+function unknownResponse(status: number): CailError {
   const message = `The CAIL backbone returned an unexpected response (status ${status}).`;
   return new CailError(
     "unknown_error",
@@ -132,14 +123,12 @@ function unknownResponse(status: number, cause?: unknown): CailError {
     {},
     "unknown_error",
     null,
-    cause,
   );
 }
 
 export function bodyError(
   status: number,
   kind: "catalog" | "quota",
-  cause?: unknown,
 ): CailError {
   const label = kind === "catalog" ? "model catalog" : "quota";
   return new CailError(
@@ -149,7 +138,6 @@ export function bodyError(
     {},
     "unknown_error",
     null,
-    cause,
   );
 }
 
@@ -167,18 +155,114 @@ function isAbortError(value: unknown): boolean {
   return value !== null && typeof value === "object" && own(value, "name") === "AbortError";
 }
 
+function isAbortSignal(value: unknown): value is AbortSignal {
+  try {
+    if (value === null || typeof value !== "object") return false;
+    const candidate = value as {
+      aborted?: unknown;
+      addEventListener?: unknown;
+      removeEventListener?: unknown;
+      dispatchEvent?: unknown;
+    };
+    return typeof candidate.aborted === "boolean" &&
+      typeof candidate.addEventListener === "function" &&
+      typeof candidate.removeEventListener === "function" &&
+      typeof candidate.dispatchEvent === "function";
+  } catch {
+    return false;
+  }
+}
+
 /** Read a response body while preserving a caller-provided abort reason. */
 export async function readText(response: Response, signal?: AbortSignal): Promise<string> {
+  if (signal !== undefined && !isAbortSignal(signal)) {
+    throw new CailError("invalid_request", "`signal` must be an AbortSignal when present.", 0);
+  }
   if (signal?.aborted) throw abortReason(signal);
-  let text: string;
+  if (response.body === null) return "";
+
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
   try {
-    text = await response.text();
+    reader = response.body.getReader();
   } catch (error) {
     if (signal?.aborted) throw abortReason(signal);
     throw error;
   }
-  if (signal?.aborted) throw abortReason(signal);
-  return text;
+
+  let cancelIssued = false;
+  const cancelReader = () => {
+    if (cancelIssued) return;
+    cancelIssued = true;
+    try {
+      void reader.cancel(abortReason(signal!)).catch(() => {});
+    } catch {
+      // Cancellation is best-effort after the caller has already aborted.
+    }
+  };
+
+  const readChunk = (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+    if (signal === undefined) return reader.read();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        cancelReader();
+        reject(abortReason(signal));
+      };
+      const onResolve = (result: ReadableStreamReadResult<Uint8Array>) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      };
+      const onReject = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      try {
+        void reader.read().then(onResolve, onReject);
+      } catch (error) {
+        onReject(error);
+      }
+    });
+  };
+
+  try {
+    const decoder = new TextDecoder();
+    let text = "";
+    while (true) {
+      if (signal?.aborted) throw abortReason(signal);
+      const result = await readChunk();
+      if (signal?.aborted) throw abortReason(signal);
+      if (result.done) break;
+      text += decoder.decode(result.value, { stream: true });
+    }
+    text += decoder.decode();
+    if (signal?.aborted) throw abortReason(signal);
+    return text;
+  } catch (error) {
+    if (signal?.aborted) throw abortReason(signal);
+    if (isAbortError(error)) throw error;
+    throw error;
+  } finally {
+    if (signal?.aborted) {
+      cancelReader();
+    }
+    try {
+      reader.releaseLock();
+    } catch {
+      // Releasing a hostile reader must not mask the response error.
+    }
+  }
 }
 
 function envelopeError(value: unknown, status: number): CailError | null {
@@ -219,7 +303,6 @@ export async function parseCailError(
   signal?: AbortSignal,
 ): Promise<CailError> {
   let parsed: unknown;
-  let cause: unknown;
   try {
     const text = await readText(response, signal);
     try {
@@ -230,7 +313,7 @@ export async function parseCailError(
   } catch (error) {
     if (signal?.aborted) throw abortReason(signal);
     if (isAbortError(error)) throw error;
-    cause = error;
+    if (error instanceof CailError) throw error;
   }
 
   if (parsed !== null && typeof parsed === "object") {
@@ -241,7 +324,7 @@ export async function parseCailError(
       return error;
     }
   }
-  const error = unknownResponse(response.status, cause);
+  const error = unknownResponse(response.status);
   responseMetadata(response, error.extras);
   return error;
 }

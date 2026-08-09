@@ -44,9 +44,12 @@ await cail.run({ model: selectedModel, input: { prompt: "Describe this image." }
 ```
 
 Key credentials send `Authorization: Bearer …`; JWT credentials send only
-`X-CAIL-Identity-JWT`. Authenticated calls include `X-CAIL-App`, strip caller
-authorization headers, use `credentials: "omit"`, reject redirects, and make
-one fetch attempt. Successful `Response` objects are returned by reference.
+`X-CAIL-Identity-JWT`. Authenticated calls include `X-CAIL-App`; CAIL
+authentication headers are authoritative, and ambient `Authorization`,
+`Proxy-Authorization`, and `Cookie` headers are stripped. The client uses
+`credentials: "omit"`, rejects redirects, and makes one fetch attempt. Other
+caller headers, including provider-specific and OpenAI extension headers, pass
+through unchanged. Successful `Response` objects are returned by reference.
 
 ## OpenAI-compatible chat
 
