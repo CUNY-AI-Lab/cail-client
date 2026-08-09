@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CailError, extractCailError, parseCailError } from "../src/index.js";
+import { readText } from "../src/errors.js";
 import { cailErrorEnvelope, cailErrorResponse } from "../src/testing.js";
 
-describe("bounded CAIL errors", () => {
+describe("CAIL errors", () => {
   it("preserves the typed envelope while copying safe extras", async () => {
     const response = cailErrorResponse(429, cailErrorEnvelope({
       message: "Budget exhausted.",
@@ -19,14 +20,76 @@ describe("bounded CAIL errors", () => {
     expect(error.extras).toMatchObject({ retry_after_seconds: 60, should_retry: false });
   });
 
-  it("fails closed for oversized or malformed bodies without echoing them", async () => {
+  it("does not copy uppercase request IDs into error extras", async () => {
+    const response = cailErrorResponse(429, cailErrorEnvelope({ code: "quota_exceeded" }), {
+      "x-request-id": "019F8BDC-342A-76E1-BA71-005D69808F86",
+    });
+    const parsed = await parseCailError(response);
+    expect(parsed.extras.request_id).toBeUndefined();
+    const extracted = extractCailError({
+      responseBody: JSON.stringify(cailErrorEnvelope({ code: "quota_exceeded" })),
+      responseHeaders: { "x-request-id": "019F8BDC-342A-76E1-BA71-005D69808F86" },
+    });
+    expect(extracted?.extras.request_id).toBeUndefined();
+  });
+
+  it("fails closed for malformed bodies without echoing them", async () => {
     const secret = "PRIVATE_BODY_SECRET";
     const oversized = new Response(secret + "x".repeat(70_000), { status: 502 });
     const error = await parseCailError(oversized);
     expect(error.code).toBe("unknown_error");
     expect(error.message).not.toContain(secret);
     expect(JSON.stringify(error)).not.toContain(secret);
+    expect((error as { cause?: unknown }).cause).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(error, "cause")).toBe(false);
     await expect(parseCailError(new Response("not json", { status: 500 }))).resolves.toMatchObject({ code: "unknown_error", status: 500 });
+  });
+
+  it("cancels an in-flight response body when the caller aborts", async () => {
+    const controller = new AbortController();
+    const reason = new Error("caller cancelled");
+    let cancelReason: unknown;
+    let releasePull: (() => void) | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start(streamController) {
+        streamController.enqueue(new TextEncoder().encode("partial"));
+      },
+      pull() {
+        return new Promise<void>((resolve) => {
+          releasePull = resolve;
+        });
+      },
+      cancel(value) {
+        cancelReason = value;
+        releasePull?.();
+      },
+    });
+    const pending = readText(new Response(stream), controller.signal);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    controller.abort(reason);
+    await expect(pending).rejects.toBe(reason);
+    expect(cancelReason).toBe(reason);
+  });
+
+  it("rejects immediately when a custom reader never settles", async () => {
+    const controller = new AbortController();
+    const reason = new Error("never-settling read cancelled");
+    const cancel = vi.fn(async () => {});
+    const reader = {
+      read: () => new Promise<ReadableStreamReadResult<Uint8Array>>(() => {}),
+      cancel,
+      releaseLock: vi.fn(),
+    };
+    const response = {
+      body: {
+        getReader: () => reader,
+      },
+    } as unknown as Response;
+    const pending = readText(response, controller.signal);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    controller.abort(reason);
+    await expect(pending).rejects.toBe(reason);
+    expect(cancel).toHaveBeenCalledOnce();
   });
 
   it("extracts nested envelopes without invoking getters or mutating prototypes", () => {

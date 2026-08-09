@@ -1,12 +1,11 @@
 # cail-client
 
-- Owns Web-standard Gateway transport helpers and the current CAIL-native wire shapes exported from `src/index.ts`.
-- The public surface covers bounded CAIL error parsing, model-catalog validation, Cloudflare quota estimates, and the buffered `POST /v1/run` extension.
-- Validate URLs, app slugs, bearer inputs, bounded JSON, and response envelopes before returning data; make one request attempt.
-- Keep `credentials: "omit"`, redirect rejection, and token/body redaction in the transport path.
-- Catalog and quota results are snapshots or estimates; Gateway, provider, and accounting systems remain authoritative.
-- Callers supply already-authorized credentials and choose official clients for OpenAI-compatible model requests.
-- Do not verify or mint identity, authorize callers, route providers, enforce quotas, implement an OpenAI-compatible client, or add silent retry/fallback.
-- Keep parsers strict and bounded so malformed or undeclared Gateway responses become safe `CailError` values.
+- Owns the Web-standard CAIL Gateway transport and the current CAIL-native wire shapes exported from `src/index.ts`.
+- The public surface covers key/JWT credential headers, OpenAI-compatible chat (`chatCompletions` and `chatFetch`), `run`, the model catalog, the Cloudflare quota estimate, and safe CAIL errors.
+- Key credentials use `Authorization: Bearer`; JWT credentials use `X-CAIL-Identity-JWT`; authenticated calls include the configured `X-CAIL-App`.
+- CAIL auth headers are authoritative: strip caller `Authorization`, `Proxy-Authorization`, CAIL authority, and `Cookie` headers at the transport boundary. Preserve unrelated provider/OpenAI extension headers unchanged.
+- Preserve caller request bodies and successful streaming `Response` objects. Make one fetch attempt and reject redirects. Do not add provider schema validation, retries, fallback routing, identity minting, authorization, or quota enforcement.
+- Errors may preserve a valid Gateway message and scalar CAIL extras, but never raw response bodies, credentials, or transport causes.
+- Catalog and quota values are validated Gateway data. They do not claim provider or accounting authority.
 
 Check with `bun run check`.

@@ -1,19 +1,17 @@
 # @cuny-ai-lab/cail-client
 
-Small Web-standard helpers for the CAIL Gateway's CAIL-native extensions. The
-package owns bounded CAIL error extraction, the public model catalog, the
-authenticated Cloudflare quota estimate, and the buffered `POST /v1/run` extension. It
-does not implement an OpenAI-compatible model client. Use the official OpenAI
-or AI SDK client for ordinary model requests.
+Small Web-standard helpers for the CAIL Gateway. The client owns credential
+headers, the OpenAI-compatible chat transport, the CAIL-native `run` route,
+the public model catalog, the Cloudflare quota estimate, and safe Gateway
+errors. It does not implement provider schemas or retry requests.
 
 ## Install
 
-The package is published to GitHub Packages. Keep the registry token outside
-the repository and pin a release in the consuming application:
+The package is published to GitHub Packages:
 
 ```ini
 @cuny-ai-lab:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${NPM_CONFIG_TOKEN}
+//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
 ```
 
 ```sh
@@ -31,93 +29,82 @@ const cail = createCailClient({
 });
 ```
 
-`baseUrl` must be an absolute HTTPS URL without credentials, a query, or a
-fragment. Local HTTP is available only for `localhost`, `127.0.0.1`, or `[::1]`
-when `allowInsecureLoopback: true` is set. The app value is a lowercase slug.
+`baseUrl` is an absolute HTTPS URL without credentials, a query, or a
+fragment. Local HTTP is available only for `localhost`, `127.0.0.1`, or
+`[::1]` with `allowInsecureLoopback: true`. The app is a lowercase slug.
 
-Every request uses one `Authorization: Bearer <token>` value, whether the
-token is a CAIL API key or a trusted Doorway identity JWT. Requests use
-`credentials: "omit"` and `redirect: "error"`; successful responses are
-returned by reference. Tokens and response bodies are never copied into
-client-generated errors.
-
-### CAIL-native run
-
-`run()` is the small buffered CAIL extension. The current Gateway accepts a
-JSON object with exactly `model` and `input`; the input must be a JSON object.
-The method sends one `POST /v1/run` attempt and returns the raw successful
-`Response`.
+Credentials can be passed as a key string shorthand or an explicit kind:
 
 ```ts
-const response = await cail.run(
-  { model: selectedModel, input: { prompt: "Describe this image." } },
-  identityJwt,
-);
-const result = await response.json();
-```
-
-For ordinary OpenAI-compatible requests, use an official client directly:
-
-```ts
-import OpenAI from "openai";
-
-const openai = new OpenAI({
-  baseURL: `${CAIL_API_BASE}/v1`,
-  apiKey: cailToken,
-  maxRetries: 0,
+await cail.run({ model: selectedModel, input: { prompt: "Describe this image." } }, apiKey);
+await cail.run({ model: selectedModel, input: { prompt: "Describe this image." } }, {
+  kind: "jwt",
+  token: identityJwt,
 });
 ```
 
-The same `baseURL`, bearer token, and `maxRetries: 0` settings apply to other
-official OpenAI-compatible or AI SDK clients.
+Key credentials send `Authorization: Bearer …`; JWT credentials send only
+`X-CAIL-Identity-JWT`. Authenticated calls include `X-CAIL-App`; CAIL
+authentication headers are authoritative, and ambient `Authorization`,
+`Proxy-Authorization`, and `Cookie` headers are stripped. The client uses
+`credentials: "omit"`, rejects redirects, and makes one fetch attempt. Other
+caller headers, including provider-specific and OpenAI extension headers, pass
+through unchanged. Successful `Response` objects are returned by reference.
 
-### Catalog and quota
+## OpenAI-compatible chat
 
-`getCatalog()` sends a credential-free `GET /v1/catalog`; its optional
-`modality` is `text`, `image`, or `all`. `getCatalogSnapshot()` consumes at
-most 8 MiB and validates the enriched CAIL catalog before returning plain
-data.
+`chatCompletions()` posts the supplied JSON object to
+`/v1/chat/completions`. Unknown provider fields pass through unchanged, and a
+streaming response remains a live Web `Response`.
+
+For an SDK that accepts a custom fetch function, use `chatFetch()`:
+
+```ts
+const fetchChat = cail.chatFetch({ kind: "key", token: apiKey });
+const response = await fetchChat(`${CAIL_API_BASE}/v1/chat/completions`, {
+  method: "POST",
+  body: JSON.stringify({ model: selectedModel, messages }),
+});
+```
+
+The adapter serves only that configured POST endpoint. It never retries. By
+default it throws a `CailError` for Gateway-declared non-retryable responses
+and quota exhaustion; `nonRetryableErrorMode: "return"` leaves those responses
+for an SDK that understands `X-Should-Retry: false`.
+
+## CAIL extensions
+
+`run()` sends `{ model, input }` to `POST /v1/run` and returns the raw response.
+`getCatalog()` sends credential-free `GET /v1/catalog`; its optional modality
+is `text`, `image`, or `all`. `getCatalogSnapshot()` validates the enriched
+catalog. `getQuota()` sends authenticated `GET /quota` and validates the
+Cloudflare-managed estimate (`microdollar` values, percentages, window
+metadata, and calculation time).
 
 ```ts
 const catalog = await cail.getCatalogSnapshot({ modality: "all" });
-const quota = await cail.getQuota(cailToken);
+const quota = await cail.getQuota(apiKey);
 ```
-
-`getQuota()` sends an authenticated `GET /quota` and validates the exact
-Cloudflare-managed estimate: microdollar amounts, whole-number percentages,
-window metadata, and calculation time. It returns observed usage only; it does
-not claim an authoritative remaining balance or reset time. Malformed successful
-bodies fail closed as `CailError` with `code: "unknown_error"`.
 
 ## Errors
 
 Non-success Gateway responses become `CailError` values with `code`, `type`,
-`param`, `status`, and bounded `extras`. A valid CAIL envelope preserves its
-message verbatim. Non-JSON, oversized, and malformed bodies produce a generic
-safe message instead of echoing raw body text.
+`param`, `status`, and scalar `extras`. A valid CAIL envelope keeps its
+message. Malformed or non-JSON bodies produce a generic safe message; raw
+bodies, tokens, and transport causes are not copied into the message or JSON
+representation.
 
 ```ts
-import { CailError, extractCailError, parseCailError } from "@cuny-ai-lab/cail-client";
+import { CailError, extractCailError } from "@cuny-ai-lab/cail-client";
 
 try {
-  await cail.getQuota(cailToken);
+  await cail.getQuota(apiKey);
 } catch (error) {
   if (error instanceof CailError) console.error(error.code, error.message);
 }
 
-// For an already-consumed SDK error object:
-const typed = extractCailError(errorValue);
+const typed = extractCailError(alreadyConsumedSdkError);
 ```
-
-`parseCailError(response)` handles a live `Response`; `extractCailError(value)`
-walks bounded, already-buffered wrapper layers such as `cause`, `error`,
-`responseBody`, `data`, `lastError`, and `errors[]` without invoking getters.
-
-## Testing fixtures
-
-The optional `@cuny-ai-lab/cail-client/testing` subpath contains pure fixtures
-for CAIL envelopes and Cloudflare quota estimates. It has no test-framework
-dependency.
 
 ## Development and publication
 
@@ -129,10 +116,10 @@ bun run check
 bun pm pack --dry-run --ignore-scripts
 ```
 
-The check gate formats tracked text, typechecks, runs focused tests, rebuilds
-and compares `dist/`, and verifies packed contents. Publication runs only from
-a clean checkout through a version-matching `v<version>` Git tag. It never
-publishes a dirty or unverified build.
+`bun run check` formats tracked sources, typechecks, runs tests, builds the
+package into the ignored `dist/` directory, and checks the package contents.
+The publish workflow runs the same check and publishes the resulting tarball
+to GitHub Packages.
 
 ## License
 

@@ -1,7 +1,7 @@
 {
   "name": "@cuny-ai-lab/cail-client",
   "version": "5.0.0",
-  "description": "Small Web-standard helpers for CAIL error, catalog, quota, and native run extensions.",
+  "description": "Web-standard CAIL Gateway transport with OpenAI-compatible chat and CAIL extensions.",
   "type": "module",
   "license": "MIT",
   "sideEffects": false,
@@ -29,15 +29,13 @@
   "packageManager": "bun@1.3.14",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "check": "bun run check:format && bun run typecheck && bun run test && bun run check:dist && bun run check:package",
-    "check:dist": "bun scripts/check-dist.ts",
+    "check": "bun run check:format && bun run typecheck && bun run test && bun run build && bun run check:package",
     "check:format": "bun scripts/check-format.ts",
     "check:package": "bun pm pack --dry-run --ignore-scripts",
-    "check:clean": "bun scripts/check-clean.ts",
     "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "bun run check && bun run check:clean",
+    "prepublishOnly": "bun run check",
     "prepare": "bun run build"
   },
   "devDependencies": {
