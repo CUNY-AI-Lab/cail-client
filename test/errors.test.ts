@@ -92,6 +92,33 @@ describe("CAIL errors", () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
+  it("snapshots a response body once when reading text", async () => {
+    let bodyReads = 0;
+    let cancelCalls = 0;
+    const body = {
+      getReader() {
+        throw new Error("private reader acquisition failure");
+      },
+      cancel() {
+        cancelCalls += 1;
+      },
+    } as unknown as ReadableStream<Uint8Array>;
+    const response = new Response(null);
+    Object.defineProperty(response, "body", {
+      configurable: true,
+      get() {
+        bodyReads += 1;
+        return body;
+      },
+    });
+
+    await expect(readText(response)).rejects.toThrow(
+      "private reader acquisition failure",
+    );
+    expect(bodyReads).toBe(1);
+    expect(cancelCalls).toBe(1);
+  });
+
   it("extracts nested envelopes without invoking getters or mutating prototypes", () => {
     const envelope = cailErrorEnvelope({ code: "quota_exceeded" });
     const wrapped = {
