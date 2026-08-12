@@ -179,13 +179,19 @@ export async function readText(response: Response, signal?: AbortSignal): Promis
     throw new CailError("invalid_request", "`signal` must be an AbortSignal when present.", 0);
   }
   if (signal?.aborted) throw abortReason(signal);
-  if (response.body === null) return "";
+  const body = response.body;
+  if (body === null) return "";
 
   let reader: ReadableStreamDefaultReader<Uint8Array>;
   try {
-    reader = response.body.getReader();
+    reader = body.getReader();
   } catch (error) {
     if (signal?.aborted) throw abortReason(signal);
+    try {
+      void Promise.resolve(body.cancel()).catch(() => {});
+    } catch {
+      // A failed body acquisition is already the primary error.
+    }
     throw error;
   }
 
