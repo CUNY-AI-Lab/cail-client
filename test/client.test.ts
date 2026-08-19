@@ -137,6 +137,14 @@ describe("CAIL Gateway transport", () => {
     const recorded = client(new Response("ok", { status: 200 }));
     const metadata: CailMetadata = { added: 2 };
     Object.defineProperty(metadata, "hidden", { enumerable: false, value: "not sent" });
+    let hiddenGetterRead = false;
+    Object.defineProperty(metadata, "hiddenGetter", {
+      enumerable: false,
+      get() {
+        hiddenGetterRead = true;
+        throw new Error("hidden metadata getter must not run");
+      },
+    });
     await recorded.client.call(
       "/v1/models",
       { method: "GET", headers: { "X-CAIL-Metadata": JSON.stringify({ existing: "yes" }) } },
@@ -153,6 +161,7 @@ describe("CAIL Gateway transport", () => {
     );
     const headers = new Headers(recorded.calls[0]?.init.headers);
     expect(JSON.parse(headers.get("x-cail-metadata") ?? "")).toEqual({ existing: "yes", added: 2 });
+    expect(hiddenGetterRead).toBe(false);
     expect(headers.get("traceparent")).toBe("00-0123456789abcdef0123456789abcdef-0123456789abcdef-01");
     expect(headers.get("x-cail-request-id")).toBe("019f8bdc-342a-76e1-ba71-005d69808f86");
   });

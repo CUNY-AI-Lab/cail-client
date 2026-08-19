@@ -188,8 +188,8 @@ function metadataEntries<Value>(value: Value): Array<[string, RuntimeProperty]> 
     const result: Array<[string, RuntimeProperty]> = [];
     for (const key of fields.names()) {
       const descriptor = fields.property(key);
-      if (!descriptor.readable) throw invalid("X-CAIL-Metadata must contain data properties.", "invalid_metadata");
       if (!descriptor.enumerable) continue;
+      if (!descriptor.readable) throw invalid("X-CAIL-Metadata must contain data properties.", "invalid_metadata");
       result.push([key, descriptor.value]);
     }
     return result;
