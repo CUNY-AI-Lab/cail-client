@@ -118,8 +118,11 @@ bun pm pack --dry-run --ignore-scripts
 
 `bun run check` formats tracked sources, typechecks, runs tests, builds the
 package into the ignored `dist/` directory, and checks the package contents.
-The publish workflow runs the same check and publishes the resulting tarball
-to GitHub Packages.
+It also runs the vendored generic [anti-slop profile](tools/oxlint/anti-slop/)
+from `tools/oxlint/anti-slop/`; its upstream commit and license are recorded
+there. Findings are fixed at their actual contract or runtime boundary. The
+publish workflow runs the same check and publishes the resulting tarball to
+GitHub Packages.
 
 ## License
 

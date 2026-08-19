@@ -49,8 +49,8 @@ describe("public catalog and quota parsers", () => {
     expect(() => parseCailQuotaSnapshot({ ...quota, estimated_remaining: 1 })).toThrow(CailError);
     expect(() => parseCailQuotaSnapshot({ ...quota, remaining_percent: 1 })).toThrow(CailError);
     expect(() => parseCailQuotaSnapshot({ ...quota, used_percent: 19, remaining_percent: 81 })).toThrow(CailError);
-    expect(() => parseCailQuotaSnapshot({ ...quota, used: 200 } as unknown)).toThrow(CailError);
-    expect(() => parseCailQuotaSnapshot({ ...quota, subject: "app-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } as unknown)).toThrow(CailError);
+    expect(() => parseCailQuotaSnapshot({ ...quota, used: 200 })).toThrow(CailError);
+    expect(() => parseCailQuotaSnapshot({ ...quota, subject: "app-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" })).toThrow(CailError);
   });
 
   it("rejects sparse, accessor, and trapped catalog arrays without reading getters", () => {
@@ -70,7 +70,7 @@ describe("public catalog and quota parsers", () => {
     const sparseCapabilities: unknown[] = [];
     sparseCapabilities.length = 1;
     expect(() => parseCailModelCatalog({ object: "list", data: [{ ...model, capabilities: sparseCapabilities }] })).toThrow(CailError);
-    expect(() => parseCailModelCatalog({ object: "list", data: [{ ...model, capabilities: new Array(33) }] })).toThrow(CailError);
+    expect(() => parseCailModelCatalog({ object: "list", data: [{ ...model, capabilities: Array.from({ length: 33 }) }] })).toThrow(CailError);
 
     const trappedCapabilities = new Proxy(["text-generation"], {
       ownKeys() {
@@ -89,7 +89,7 @@ describe("public catalog and quota parsers", () => {
     const sparseData: unknown[] = [];
     sparseData.length = 1;
     expect(() => parseCailModelCatalog({ object: "list", data: sparseData })).toThrow(CailError);
-    expect(() => parseCailModelCatalog({ object: "list", data: new Array(2_001) })).toThrow(CailError);
+    expect(() => parseCailModelCatalog({ object: "list", data: Array.from({ length: 2_001 }) })).toThrow(CailError);
     const trappedData = new Proxy([model], {
       ownKeys() {
         throw new Error("catalog ownKeys");
@@ -121,7 +121,7 @@ describe("public catalog and quota parsers", () => {
       window_seconds: 60,
       calculated_at: 1_720_600_000,
     };
-    const hostile = { ...validQuota } as Record<string, unknown>;
+    const hostile = { ...validQuota };
     Object.defineProperty(hostile, "estimated_remaining", {
       enumerable: true,
       get() {

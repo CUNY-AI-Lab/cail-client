@@ -5,7 +5,7 @@ export interface CailErrorEnvelopeError {
   type: string;
   param: string | null;
   code: string;
-  cail?: Record<string, unknown>;
+  cail?: object;
 }
 
 export interface CailErrorEnvelope {
@@ -13,14 +13,15 @@ export interface CailErrorEnvelope {
 }
 
 export function cailErrorEnvelope(overrides: Partial<CailErrorEnvelopeError> = {}): CailErrorEnvelope {
+  const error: CailErrorEnvelopeError = {
+    message: overrides.message ?? "The request was rejected by the CAIL backbone.",
+    type: overrides.type ?? "invalid_request_error",
+    param: overrides.param ?? null,
+    code: overrides.code ?? "invalid_request",
+  };
+  if (overrides.cail !== undefined) error.cail = overrides.cail;
   return {
-    error: {
-      message: overrides.message ?? "The request was rejected by the CAIL backbone.",
-      type: overrides.type ?? "invalid_request_error",
-      param: overrides.param ?? null,
-      code: overrides.code ?? "invalid_request",
-      ...(overrides.cail === undefined ? {} : { cail: overrides.cail }),
-    },
+    error,
   };
 }
 

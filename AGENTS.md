@@ -7,5 +7,11 @@
 - Preserve caller request bodies and successful streaming `Response` objects. Make one fetch attempt and reject redirects. Do not add provider schema validation, retries, fallback routing, identity minting, authorization, or quota enforcement.
 - Errors may preserve a valid Gateway message and scalar CAIL extras, but never raw response bodies, credentials, or transport causes.
 - Catalog and quota values are validated Gateway data. They do not claim provider or accounting authority.
+- `bun run check` starts with the vendored generic anti-slop profile in
+  `tools/oxlint/anti-slop/`. Fix findings at the actual contract or boundary;
+  do not add rule suppressions, evasive wrappers, or generic safety comments.
+  The profile source and license are recorded in `tools/oxlint/anti-slop/`.
+- This package does not depend on Effect, so the profile's Effect-specific
+  rules remain disabled.
 
 Check with `bun run check`.

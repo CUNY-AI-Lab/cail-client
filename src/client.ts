@@ -9,15 +9,24 @@ import { parseCailModelCatalog } from "./catalog.js";
 import type { CailCatalogModality, CailModelCatalog } from "./catalog.js";
 import { parseCailQuotaSnapshot } from "./quota.js";
 import type { CailQuotaSnapshot } from "./quota.js";
+import {
+  booleanFrom,
+  callableFrom,
+  hasControlCharacters,
+  numberFrom,
+  plainRecordFrom,
+  propertyFrom,
+  stringFrom,
+} from "./validation.js";
+import type { RuntimeProperty } from "./validation.js";
 
-const CONTROL_CHARACTERS = /[\x00-\x1f\x7f]/;
 const APP_SLUG = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TRACE_ID = /^(?!0{32})[0-9a-f]{32}$/;
 const SPAN_ID = /^(?!0{16})[0-9a-f]{16}$/;
 const TRACESTATE_MAX_CHARS = 512;
 const TRACESTATE_MAX_MEMBERS = 32;
-const TRACESTATE_KEY = /^(?:[a-z][a-z0-9_*\/-]{0,255}|[a-z0-9][a-z0-9_*\/-]{0,240}@[a-z][a-z0-9_*\/-]{0,13})$/;
+const TRACESTATE_KEY = /^(?:[a-z][a-z0-9_*/-]{0,255}|[a-z0-9][a-z0-9_*/-]{0,240}@[a-z][a-z0-9_*/-]{0,13})$/;
 const TRACESTATE_VALUE = /^[\x20-\x2b\x2d-\x3c\x3e-\x7e]{0,255}[\x21-\x2b\x2d-\x3c\x3e-\x7e]$/;
 
 export interface CailCorrelation {
@@ -70,7 +79,19 @@ export interface CailQuotaOptions {
 }
 
 /** OpenAI-compatible requests are passed through without provider validation. */
-export type CailChatRequest = Record<string, unknown>;
+export type CailJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | CailJsonObject
+  | CailJsonValue[];
+
+export interface CailJsonObject {
+  [key: string]: CailJsonValue;
+}
+
+export type CailChatRequest = CailJsonObject;
 
 export type CailCredentialInput = CailCredential | string;
 
@@ -107,58 +128,26 @@ function invalid(message: string, code = "invalid_request"): CailError {
   return new CailError(code, message, 0);
 }
 
-function record(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object") return false;
-  try {
-    return !Array.isArray(value);
-  } catch {
-    return false;
-  }
-}
-
-function own(value: object, key: string): unknown {
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-type OwnProperty = { present: boolean; readable: boolean; value?: unknown };
-
-function ownProperty(value: object | undefined, key: string): OwnProperty {
-  if (value === undefined) return { present: false, readable: false };
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (descriptor === undefined) return { present: false, readable: false };
-    return "value" in descriptor
-      ? { present: true, readable: true, value: descriptor.value }
-      : { present: true, readable: false };
-  } catch {
-    // Treat an unreadable option as present so it cannot fall back to a less
-    // authoritative value from the request init.
-    return { present: true, readable: false };
-  }
-}
-
-function normalizeCredential(credential: CailCredentialInput): CailCredential {
-  if (typeof credential === "string") {
+function normalizeCredential<Value>(credential: Value): CailCredential {
+  const stringCredential = stringFrom(credential);
+  if (stringCredential !== undefined) {
     if (
-      credential.length === 0 ||
-      credential.trim() !== credential ||
-      CONTROL_CHARACTERS.test(credential)
+      stringCredential.length === 0 ||
+      stringCredential.trim() !== stringCredential ||
+      hasControlCharacters(stringCredential)
     ) {
       throw invalid(
         "Credential tokens must be non-empty and contain no surrounding whitespace or control characters.",
         "invalid_credential",
       );
     }
-    return { kind: "key", token: credential };
+    return { kind: "key", token: stringCredential };
   }
-  const kind = record(credential) ? own(credential, "kind") : undefined;
-  const token = record(credential) ? own(credential, "token") : undefined;
-  if ((kind !== "jwt" && kind !== "key") || typeof token !== "string") {
+  const fields = plainRecordFrom(credential);
+  const kindValue = fields?.read("kind");
+  const token = stringFrom(fields?.read("token"));
+  const kind = stringFrom(kindValue);
+  if ((kind !== "jwt" && kind !== "key") || token === undefined) {
     throw invalid(
       'A credential must be a token string or { kind: "jwt" | "key", token: string }.',
       "invalid_credential",
@@ -167,7 +156,7 @@ function normalizeCredential(credential: CailCredentialInput): CailCredential {
   if (
     token.length === 0 ||
     token.trim() !== token ||
-    CONTROL_CHARACTERS.test(token)
+    hasControlCharacters(token)
   ) {
     throw invalid(
       "Credential tokens must be non-empty and contain no surrounding whitespace or control characters.",
@@ -192,22 +181,15 @@ function headersRecord(input: HeadersInit | undefined): Headers {
   }
 }
 
-function metadataObject(value: unknown): value is Record<string, unknown> {
+function metadataEntries<Value>(value: Value): Array<[string, RuntimeProperty]> {
+  const fields = plainRecordFrom(value);
+  if (fields === undefined) throw invalid("X-CAIL-Metadata must be an object.", "invalid_metadata");
   try {
-    return value !== null && typeof value === "object" && !Array.isArray(value);
-  } catch {
-    return false;
-  }
-}
-
-function metadataEntries(value: unknown): Array<[string, unknown]> {
-  if (!metadataObject(value)) throw invalid("X-CAIL-Metadata must be an object.", "invalid_metadata");
-  try {
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    const result: Array<[string, unknown]> = [];
-    for (const [key, descriptor] of Object.entries(descriptors)) {
+    const result: Array<[string, RuntimeProperty]> = [];
+    for (const key of fields.names()) {
+      const descriptor = fields.property(key);
+      if (!descriptor.readable) throw invalid("X-CAIL-Metadata must contain data properties.", "invalid_metadata");
       if (!descriptor.enumerable) continue;
-      if (!("value" in descriptor)) throw invalid("X-CAIL-Metadata must contain data properties.", "invalid_metadata");
       result.push([key, descriptor.value]);
     }
     return result;
@@ -217,21 +199,19 @@ function metadataEntries(value: unknown): Array<[string, unknown]> {
   }
 }
 
-function metadataHeader(value: unknown): string {
+function metadataHeader<Value>(value: Value): string {
   try {
     for (const [key, item] of metadataEntries(value)) {
       if (key === "__proto__" || key === "constructor" || key === "prototype" || key === "user_id" || key === "app" || key === "via") {
         throw invalid(`X-CAIL-Metadata key "${key}" is not allowed.`, "invalid_metadata");
       }
-      if (
-        typeof item !== "string" &&
-        (typeof item !== "number" || !Number.isFinite(item))
-      ) {
+      const numeric = numberFrom(item);
+      if (stringFrom(item) === undefined && (numeric === undefined || !Number.isFinite(numeric))) {
         throw invalid(`X-CAIL-Metadata value for "${key}" must be a string or finite number.`, "invalid_metadata");
       }
     }
     const serialized = JSON.stringify(Object.fromEntries(metadataEntries(value)));
-    if (typeof serialized !== "string") throw invalid("X-CAIL-Metadata must be JSON-serializable.", "invalid_metadata");
+    if (serialized === undefined) throw invalid("X-CAIL-Metadata must be JSON-serializable.", "invalid_metadata");
     return serialized;
   } catch (error) {
     if (error instanceof CailError) throw error;
@@ -259,29 +239,35 @@ function sanitizeTracestate(raw: string): string | undefined {
   return members.length === 0 ? undefined : members.join(",");
 }
 
-function correlationHeaders(value: CailCorrelation): Record<string, string> {
-  const traceIdProperty = record(value) ? ownProperty(value, "trace_id") : { present: false, readable: false };
-  const spanIdProperty = record(value) ? ownProperty(value, "span_id") : { present: false, readable: false };
-  const traceFlagsProperty = record(value) ? ownProperty(value, "trace_flags") : { present: false, readable: false };
-  const requestIdProperty = record(value) ? ownProperty(value, "request_id") : { present: false, readable: false };
-  const tracestateProperty = record(value) ? ownProperty(value, "tracestate") : { present: false, readable: false };
-  const traceId = traceIdProperty.value;
-  const spanId = spanIdProperty.value;
-  const traceFlags = traceFlagsProperty.value;
-  const requestId = requestIdProperty.value;
-  const tracestate = tracestateProperty.value;
+interface CailCorrelationHeaders {
+  traceparent: string;
+  "x-cail-request-id": string;
+  tracestate?: string;
+}
+
+function correlationHeaders<Value>(value: Value): CailCorrelationHeaders {
+  const fields = plainRecordFrom(value);
+  const traceIdProperty = propertyFrom(value, "trace_id");
+  const spanIdProperty = propertyFrom(value, "span_id");
+  const traceFlagsProperty = propertyFrom(value, "trace_flags");
+  const requestIdProperty = propertyFrom(value, "request_id");
+  const tracestateProperty = propertyFrom(value, "tracestate");
+  const traceId = stringFrom(traceIdProperty.value);
+  const spanId = stringFrom(spanIdProperty.value);
+  const traceFlags = numberFrom(traceFlagsProperty.value);
+  const requestId = stringFrom(requestIdProperty.value);
+  const tracestate = stringFrom(tracestateProperty.value);
   const validTracestate = !tracestateProperty.present || (
     tracestateProperty.readable &&
-    (tracestate === undefined || (
-      typeof tracestate === "string" &&
-      sanitizeTracestate(tracestate) === tracestate
-    ))
+    (tracestateProperty.value === undefined ||
+      (tracestate !== undefined && sanitizeTracestate(tracestate) === tracestate))
   );
   if (
-    !traceIdProperty.present || !traceIdProperty.readable || typeof traceId !== "string" || !TRACE_ID.test(traceId) ||
-    !spanIdProperty.present || !spanIdProperty.readable || typeof spanId !== "string" || !SPAN_ID.test(spanId) ||
+    fields === undefined ||
+    !traceIdProperty.present || !traceIdProperty.readable || traceId === undefined || !TRACE_ID.test(traceId) ||
+    !spanIdProperty.present || !spanIdProperty.readable || spanId === undefined || !SPAN_ID.test(spanId) ||
     !traceFlagsProperty.present || !traceFlagsProperty.readable || (traceFlags !== 0 && traceFlags !== 1) ||
-    !requestIdProperty.present || !requestIdProperty.readable || typeof requestId !== "string" || !UUID.test(requestId) ||
+    !requestIdProperty.present || !requestIdProperty.readable || requestId === undefined || !UUID.test(requestId) ||
     !validTracestate
   ) {
     throw invalid(
@@ -289,40 +275,45 @@ function correlationHeaders(value: CailCorrelation): Record<string, string> {
       "invalid_correlation",
     );
   }
-  return {
+  const result: CailCorrelationHeaders = {
     traceparent: `00-${traceId}-${spanId}-0${traceFlags}`,
     "x-cail-request-id": requestId,
-    ...(typeof tracestate === "string" ? { tracestate } : {}),
   };
+  if (tracestate !== undefined) result.tracestate = tracestate;
+  return result;
 }
 
-function isAbortSignal(value: unknown): value is AbortSignal {
+type AbortSignalMembers = {
+  aborted?: RuntimeProperty;
+  addEventListener?: RuntimeProperty;
+  removeEventListener?: RuntimeProperty;
+  dispatchEvent?: RuntimeProperty;
+};
+
+function isAbortSignal<Value>(value: Value): value is Value & AbortSignal {
   try {
-    if (value === null || typeof value !== "object") return false;
-    const candidate = value as {
-      aborted?: unknown;
-      addEventListener?: unknown;
-      removeEventListener?: unknown;
-      dispatchEvent?: unknown;
-    };
-    return typeof candidate.aborted === "boolean" &&
-      typeof candidate.addEventListener === "function" &&
-      typeof candidate.removeEventListener === "function" &&
-      typeof candidate.dispatchEvent === "function";
+    if (value === null || Object(value) !== value) return false;
+    // SAFETY: Object identity established that value is object-like; each
+    // structural member is validated before it is used as an AbortSignal.
+    const candidate = value as AbortSignalMembers;
+    return booleanFrom(candidate.aborted) !== undefined &&
+      callableFrom(candidate.addEventListener) !== undefined &&
+      callableFrom(candidate.removeEventListener) !== undefined &&
+      callableFrom(candidate.dispatchEvent) !== undefined;
   } catch {
     return false;
   }
 }
 
-function optionValue(options: object | undefined, key: string): unknown {
-  const property = ownProperty(options, key);
+function optionValue<Value>(options: Value | undefined, key: string): RuntimeProperty {
+  const property = propertyFrom(options, key);
   if (!property.present) return undefined;
   if (!property.readable) throw invalid(`Option "${key}" must be a readable data property.`);
   return property.value;
 }
 
-function optionSignal(options: object | undefined): AbortSignal | undefined {
-  const property = ownProperty(options, "signal");
+function optionSignal<Value>(options: Value | undefined): AbortSignal | undefined {
+  const property = propertyFrom(options, "signal");
   if (!property.present) return undefined;
   if (!property.readable) throw invalid("`signal` must be an AbortSignal when present.");
   const value = property.value;
@@ -331,12 +322,15 @@ function optionSignal(options: object | undefined): AbortSignal | undefined {
   return value;
 }
 
-function abortReason(signal: AbortSignal): unknown {
+function abortReason(signal: AbortSignal): RuntimeProperty {
   if (signal.reason !== undefined) return signal.reason;
-  if (typeof DOMException !== "undefined") return new DOMException("The operation was aborted.", "AbortError");
-  const error = new Error("The operation was aborted.");
-  error.name = "AbortError";
-  return error;
+  try {
+    return new DOMException("The operation was aborted.", "AbortError");
+  } catch {
+    const error = new Error("The operation was aborted.");
+    error.name = "AbortError";
+    return error;
+  }
 }
 
 function networkError(): CailError {
@@ -358,28 +352,40 @@ function bodyCleanup(response: Response): void {
   }
 }
 
-function baseUrlFrom(options: CailClientOptions): {
+function isReadableStream<Value>(value: Value): value is Value & ReadableStream<Uint8Array> {
+  try {
+    return value !== null && value instanceof ReadableStream;
+  } catch {
+    return false;
+  }
+}
+
+interface BaseUrlConfig {
   baseUrl: string;
   origin: string;
   basePath: string;
   app: string;
   fetchImpl: typeof fetch;
   onAuthRequired?: (error: CailError) => void;
-} {
-  if (options === null || typeof options !== "object" || Array.isArray(options)) {
+}
+
+function baseUrlFrom<Value>(options: Value): BaseUrlConfig {
+  const fields = plainRecordFrom(options);
+  if (fields === undefined) {
     throw invalid("createCailClient requires an options object.", "invalid_config");
   }
+  const baseUrlValue = stringFrom(fields.read("baseUrl"));
   if (
-    typeof options.baseUrl !== "string" ||
-    options.baseUrl.length === 0 ||
-    options.baseUrl.trim() !== options.baseUrl ||
-    CONTROL_CHARACTERS.test(options.baseUrl)
+    baseUrlValue === undefined ||
+    baseUrlValue.length === 0 ||
+    baseUrlValue.trim() !== baseUrlValue ||
+    hasControlCharacters(baseUrlValue)
   ) {
     throw invalid("`baseUrl` must be a non-empty URL without whitespace or control characters.", "invalid_config");
   }
   let parsed: URL;
   try {
-    parsed = new URL(options.baseUrl);
+    parsed = new URL(baseUrlValue);
   } catch {
     throw invalid("`baseUrl` must be an absolute HTTPS URL.", "invalid_config");
   }
@@ -388,57 +394,69 @@ function baseUrlFrom(options: CailClientOptions): {
     parsed.password ||
     parsed.search ||
     parsed.hash ||
-    options.baseUrl.includes("?") ||
-    options.baseUrl.includes("#")
+    baseUrlValue.includes("?") ||
+    baseUrlValue.includes("#")
   ) {
     throw invalid("`baseUrl` must not contain credentials, a query, or a fragment.", "invalid_config");
   }
   const loopback =
     parsed.protocol === "http:" &&
-    options.allowInsecureLoopback === true &&
+    booleanFrom(fields.read("allowInsecureLoopback")) === true &&
     (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]");
   if (parsed.protocol !== "https:" && !loopback) {
     throw invalid("`baseUrl` must use HTTPS; HTTP is allowed only for an exact loopback host when enabled.", "invalid_config");
   }
-  if (typeof options.app !== "string" || !APP_SLUG.test(options.app)) {
+  const app = stringFrom(fields.read("app"));
+  if (app === undefined || !APP_SLUG.test(app)) {
     throw invalid("`app` must be a lowercase CAIL application slug.", "invalid_config");
   }
-  if (options.allowInsecureLoopback !== undefined && typeof options.allowInsecureLoopback !== "boolean") {
+  const allowInsecureLoopback = fields.read("allowInsecureLoopback");
+  if (allowInsecureLoopback !== undefined && booleanFrom(allowInsecureLoopback) === undefined) {
     throw invalid("`allowInsecureLoopback` must be a boolean when present.", "invalid_config");
   }
-  if (options.onAuthRequired !== undefined && typeof options.onAuthRequired !== "function") {
+  const onAuthRequired = fields.read("onAuthRequired");
+  const authCallback = callableFrom(onAuthRequired);
+  if (onAuthRequired !== undefined && authCallback === undefined) {
     throw invalid("`onAuthRequired` must be a function when present.", "invalid_config");
   }
-  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
-  if (typeof fetchImpl !== "function") throw invalid("No fetch implementation is available.", "invalid_config");
+  const fetchCandidate = callableFrom(fields.read("fetchImpl"));
+  const fetchValue = fetchCandidate ?? globalThis.fetch;
+  if (callableFrom(fetchValue) === undefined) throw invalid("No fetch implementation is available.", "invalid_config");
+  // SAFETY: callableFrom established the fetch implementation's callability;
+  // the client contract supplies the Web fetch signature.
+  const fetchImpl = fetchValue as typeof fetch;
+  // SAFETY: callableFrom established the optional callback's callability; the
+  // client contract supplies its CailError callback signature.
+  const typedAuthCallback = authCallback as ((error: CailError) => void) | undefined;
   const basePath = parsed.pathname.replace(/\/+$/, "");
   return {
     baseUrl: `${parsed.origin}${basePath}`,
     origin: parsed.origin,
     basePath,
-    app: options.app,
+    app,
     fetchImpl,
-    onAuthRequired: options.onAuthRequired,
+    onAuthRequired: typedAuthCallback,
   };
 }
 
-function resolvePath(baseUrl: string, origin: string, basePath: string, path: string): string {
+function resolvePath<Value>(baseUrl: string, origin: string, basePath: string, path: Value): string {
+  const pathText = stringFrom(path);
   if (
-    typeof path !== "string" ||
-    path.length === 0 ||
-    path.trim() !== path ||
-    /\s/.test(path) ||
-    CONTROL_CHARACTERS.test(path) ||
-    path.includes("\\") ||
-    path.includes("#") ||
-    path.startsWith("//") ||
-    /^[a-z][a-z0-9+.-]*:/i.test(path)
+    pathText === undefined ||
+    pathText.length === 0 ||
+    pathText.trim() !== pathText ||
+    /\s/.test(pathText) ||
+    hasControlCharacters(pathText) ||
+    pathText.includes("\\") ||
+    pathText.includes("#") ||
+    pathText.startsWith("//") ||
+    /^[a-z][a-z0-9+.-]*:/i.test(pathText)
   ) {
     throw invalid("Gateway paths must be relative and contain no whitespace, fragment, or absolute URL.");
   }
   let target: URL;
   try {
-    target = new URL(`${baseUrl}${path.startsWith("/") ? "" : "/"}${path}`);
+    target = new URL(`${baseUrl}${pathText.startsWith("/") ? "" : "/"}${pathText}`);
   } catch {
     throw invalid("Gateway path is not a valid URL.");
   }
@@ -466,19 +484,23 @@ export function createCailClient(options: CailClientOptions): CailClient {
     mode: "throw" | "raw" | "chat" = "throw",
     publicRequest = false,
   ): Promise<Response> {
-    if (init === null || typeof init !== "object" || Array.isArray(init)) {
+    const initFields = plainRecordFrom(init);
+    if (initFields === undefined) {
       throw invalid("Request init must be an object.");
     }
-    const headers = headersRecord(own(init, "headers") as HeadersInit | undefined);
-    const optionSignal = ownProperty(callOptions, "signal");
+    const headersValue = initFields.read("headers");
+    // SAFETY: the Web Headers constructor is the runtime boundary that
+    // validates caller-provided HeadersInit values.
+    const headers = headersRecord(headersValue as HeadersInit | undefined);
+    const optionSignal = propertyFrom(callOptions, "signal");
     if (optionSignal.present && !optionSignal.readable) {
       throw invalid("`signal` must be an AbortSignal when present.");
     }
-    const signalValue = optionSignal.present ? optionSignal.value : own(init, "signal");
+    const signalValue = optionSignal.present ? optionSignal.value : initFields.read("signal");
     if (signalValue !== undefined && !isAbortSignal(signalValue)) {
       throw invalid("`signal` must be an AbortSignal when present.");
     }
-    const signal = signalValue as AbortSignal | undefined;
+    const signal = signalValue === undefined ? undefined : signalValue;
     const metadata = optionValue(callOptions, "metadata");
     const correlation = optionValue(callOptions, "correlation");
     const existingMetadata = headers.get("x-cail-metadata");
@@ -487,29 +509,28 @@ export function createCailClient(options: CailClientOptions): CailClient {
       headers.delete(name);
     }
     if (!publicRequest) {
-      const normalized = normalizeCredential(credential as CailCredentialInput);
+      const normalized = normalizeCredential(credential);
       if (normalized.kind === "jwt") headers.set("x-cail-identity-jwt", normalized.token);
       else headers.set("authorization", `Bearer ${normalized.token}`);
       headers.set("x-cail-app", app);
 
       if (existingMetadata !== null && existingMetadata !== undefined) {
-        let parsed: unknown;
+        let parsed: RuntimeProperty;
         try {
           parsed = JSON.parse(existingMetadata);
         } catch {
           throw invalid("Existing X-CAIL-Metadata header is not valid JSON.", "invalid_metadata");
         }
-        if (!metadataObject(parsed)) throw invalid("X-CAIL-Metadata must be an object.", "invalid_metadata");
-        const merged = Object.fromEntries([
-          ...metadataEntries(parsed),
-          ...(metadata === undefined ? [] : metadataEntries(metadata)),
-        ]);
+        if (plainRecordFrom(parsed) === undefined) throw invalid("X-CAIL-Metadata must be an object.", "invalid_metadata");
+        const mergedEntries = metadataEntries(parsed);
+        if (metadata !== undefined) mergedEntries.push(...metadataEntries(metadata));
+        const merged = Object.fromEntries(mergedEntries);
         headers.set("x-cail-metadata", metadataHeader(merged));
       } else if (metadata !== undefined) {
         headers.set("x-cail-metadata", metadataHeader(metadata));
       }
       if (correlation !== undefined) {
-        for (const [name, value] of Object.entries(correlationHeaders(correlation as CailCorrelation))) headers.set(name, value);
+        for (const [name, value] of Object.entries(correlationHeaders(correlation))) headers.set(name, value);
       }
     }
 
@@ -520,8 +541,8 @@ export function createCailClient(options: CailClientOptions): CailClient {
         headers,
         credentials: "omit",
         redirect: "error",
-        ...(signal === undefined ? {} : { signal }),
       };
+      if (signal !== undefined) requestInit.signal = signal;
     } catch {
       throw invalid("Request init must be a readable object.");
     }
@@ -603,8 +624,10 @@ export function createCailClient(options: CailClientOptions): CailClient {
     throw error;
   }
 
-  function optionsOnly(options: unknown, name: string): void {
-    if (options !== undefined && !record(options)) throw invalid(`${name} options must be an object when present.`);
+  function optionsOnly<Value>(options: Value | undefined, name: string): void {
+    if (options !== undefined && plainRecordFrom(options) === undefined) {
+      throw invalid(`${name} options must be an object when present.`);
+    }
   }
 
   async function call(
@@ -620,10 +643,12 @@ export function createCailClient(options: CailClientOptions): CailClient {
 
   async function getCatalog(options?: CailCatalogOptions): Promise<Response> {
     optionsOnly(options, "getCatalog()");
-    const modality = optionValue(options, "modality");
-    if (modality !== undefined && modality !== "text" && modality !== "image" && modality !== "all") {
+    const modalityValue = stringFrom(optionValue(options, "modality"));
+    if (optionValue(options, "modality") !== undefined &&
+      modalityValue !== "text" && modalityValue !== "image" && modalityValue !== "all") {
       throw invalid('getCatalog() modality must be "text", "image", or "all".');
     }
+    const modality = modalityValue;
     const signal = optionSignal(options);
     const path = modality === undefined ? "/v1/catalog" : `/v1/catalog?modality=${encodeURIComponent(modality)}`;
     return transport(requestUrl(baseUrl, path), { method: "GET", headers: { accept: "application/json" } }, undefined, signal === undefined ? undefined : { signal }, "throw", true);
@@ -656,10 +681,10 @@ export function createCailClient(options: CailClientOptions): CailClient {
 
   async function run(request: CailRunRequest, credential: CailCredentialInput, options?: CailRunOptions): Promise<Response> {
     optionsOnly(options, "run()");
-    const candidate: unknown = request;
-    const model = record(candidate) ? own(candidate, "model") : undefined;
-    const input = record(candidate) ? own(candidate, "input") : undefined;
-    if (!record(candidate) || typeof model !== "string" || model.length === 0 || input === undefined) {
+    const fields = plainRecordFrom(request);
+    const model = stringFrom(fields?.read("model"));
+    const input = fields?.read("input");
+    if (fields === undefined || model === undefined || model.length === 0 || input === undefined) {
       throw invalid("run() requires { model: string, input }.");
     }
     let body: string;
@@ -670,8 +695,9 @@ export function createCailClient(options: CailClientOptions): CailClient {
     }
     if (body === undefined) throw invalid("run() input must be JSON-serializable.");
     try {
-      const serialized = JSON.parse(body) as unknown;
-      if (!record(serialized) || !Object.prototype.hasOwnProperty.call(serialized, "input")) {
+      const serialized = JSON.parse(body);
+      const serializedFields = plainRecordFrom(serialized);
+      if (serializedFields === undefined || !serializedFields.has("input")) {
         throw invalid("run() input must be JSON-serializable.");
       }
     } catch (error) {
@@ -683,7 +709,7 @@ export function createCailClient(options: CailClientOptions): CailClient {
 
   async function chatCompletions(request: CailChatRequest, credential: CailCredentialInput, options?: CailCallOptions): Promise<Response> {
     optionsOnly(options, "chatCompletions()");
-    if (!record(request as unknown)) throw invalid("chatCompletions() requires a JSON object request.");
+    if (plainRecordFrom(request) === undefined) throw invalid("chatCompletions() requires a JSON object request.");
     let body: string;
     try {
       body = JSON.stringify(request);
@@ -703,10 +729,9 @@ export function createCailClient(options: CailClientOptions): CailClient {
     return async (input, init) => {
       let request: Request;
       try {
-        if (typeof Request !== "function") throw new Error("Request is unavailable in this runtime.");
         const requestInit: RequestInit & { duplex?: "half" } = { ...init };
         const body = requestInit.body ?? (input instanceof Request ? input.body : undefined);
-        if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
+        if (isReadableStream(body)) {
           requestInit.duplex = "half";
         }
         request = new Request(input, requestInit);

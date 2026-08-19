@@ -5,11 +5,13 @@ import { cailErrorEnvelope, cailErrorResponse } from "../src/testing.js";
 
 describe("CAIL errors", () => {
   it("preserves the typed envelope while copying safe extras", async () => {
+    const cailExtras = { retry_after_seconds: 60 };
+    Object.defineProperty(cailExtras, "hidden", { enumerable: false, value: "not copied" });
     const response = cailErrorResponse(429, cailErrorEnvelope({
       message: "Budget exhausted.",
       type: "rate_limit_error",
       code: "quota_exceeded",
-      cail: { retry_after_seconds: 60 },
+      cail: cailExtras,
     }), {
       "x-request-id": "019f8bdc-342a-76e1-ba71-005d69808f86",
       "x-should-retry": "false",
@@ -18,6 +20,7 @@ describe("CAIL errors", () => {
     expect(error).toBeInstanceOf(CailError);
     expect(error).toMatchObject({ code: "quota_exceeded", status: 429, message: "Budget exhausted." });
     expect(error.extras).toMatchObject({ retry_after_seconds: 60, should_retry: false });
+    expect(error.extras).not.toHaveProperty("hidden");
   });
 
   it("does not copy uppercase request IDs into error extras", async () => {
@@ -40,7 +43,7 @@ describe("CAIL errors", () => {
     expect(error.code).toBe("unknown_error");
     expect(error.message).not.toContain(secret);
     expect(JSON.stringify(error)).not.toContain(secret);
-    expect((error as { cause?: unknown }).cause).toBeUndefined();
+    expect(error).not.toHaveProperty("cause");
     expect(Object.prototype.hasOwnProperty.call(error, "cause")).toBe(false);
     await expect(parseCailError(new Response("not json", { status: 500 }))).resolves.toMatchObject({ code: "unknown_error", status: 500 });
   });
@@ -80,11 +83,15 @@ describe("CAIL errors", () => {
       cancel,
       releaseLock: vi.fn(),
     };
-    const response = {
-      body: {
-        getReader: () => reader,
+    // SAFETY: this fixture replaces only the response body boundary needed to
+    // exercise cancellation of a reader that never settles.
+    const response = new Response(null);
+    Object.defineProperty(response, "body", {
+      configurable: true,
+      get() {
+        return { getReader: () => reader };
       },
-    } as unknown as Response;
+    });
     const pending = readText(response, controller.signal);
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     controller.abort(reason);
@@ -102,7 +109,7 @@ describe("CAIL errors", () => {
       cancel() {
         cancelCalls += 1;
       },
-    } as unknown as ReadableStream<Uint8Array>;
+    };
     const response = new Response(null);
     Object.defineProperty(response, "body", {
       configurable: true,
@@ -129,7 +136,7 @@ describe("CAIL errors", () => {
     expect(extractCailError(wrapped)).toMatchObject({ code: "quota_exceeded", status: 429 });
 
     let getterCalled = false;
-    const hostile = Object.create(null) as Record<string, unknown>;
+    const hostile = Object.create(null);
     Object.defineProperty(hostile, "error", {
       enumerable: true,
       get() {
@@ -140,7 +147,7 @@ describe("CAIL errors", () => {
     expect(extractCailError(hostile)).toBeNull();
     expect(getterCalled).toBe(false);
 
-    const pollutedExtras = Object.create(null) as Record<string, unknown>;
+    const pollutedExtras = Object.create(null);
     Object.defineProperty(pollutedExtras, "__proto__", {
       enumerable: true,
       value: { polluted: true },
@@ -148,7 +155,11 @@ describe("CAIL errors", () => {
     const polluted = cailErrorEnvelope({ cail: pollutedExtras });
     const extracted = extractCailError(polluted);
     expect(extracted).toBeNull();
-    expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
+    interface PollutedProbe {
+      polluted?: boolean;
+    }
+    const probe: PollutedProbe = {};
+    expect(probe.polluted).toBeUndefined();
   });
 
   it("returns live errors when metadata cannot be attached", () => {
@@ -157,7 +168,7 @@ describe("CAIL errors", () => {
       new CailError("live", "frozen", 500, Object.freeze({})),
       new CailError("live", "sealed", 500, Object.preventExtensions({})),
     ];
-    const accessorExtras: Record<string, unknown> = {};
+    const accessorExtras = {};
     Object.defineProperty(accessorExtras, "request_id", {
       configurable: false,
       enumerable: true,
@@ -195,15 +206,18 @@ describe("CAIL errors", () => {
   });
 
   it("bounds hostile wrapper graphs and copies only safe response headers", () => {
-    const cycle: Record<string, unknown> = {};
+    interface CauseNode {
+      cause?: CauseNode;
+    }
+    const cycle: CauseNode = {};
     cycle.cause = cycle;
     expect(() => extractCailError(cycle)).not.toThrow();
     expect(extractCailError(cycle)).toBeNull();
 
-    let deep: Record<string, unknown> = {};
+    let deep: CauseNode = {};
     const root = deep;
     for (let index = 0; index < 300; index += 1) {
-      const child: Record<string, unknown> = {};
+      const child: CauseNode = {};
       deep.cause = child;
       deep = child;
     }
