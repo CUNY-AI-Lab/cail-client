@@ -55,7 +55,8 @@ through unchanged. Successful `Response` objects are returned by reference.
 
 `chatCompletions()` posts the supplied JSON object to
 `/v1/chat/completions`. Unknown provider fields pass through unchanged, and a
-streaming response remains a live Web `Response`.
+streaming response remains a live Web `Response`. The TypeScript request type
+models this JSON boundary without imposing a provider schema.
 
 For an SDK that accepts a custom fetch function, use `chatFetch()`:
 
@@ -89,10 +90,11 @@ const quota = await cail.getQuota(apiKey);
 ## Errors
 
 Non-success Gateway responses become `CailError` values with `code`, `type`,
-`param`, `status`, and scalar `extras`. A valid CAIL envelope keeps its
-message. Malformed or non-JSON bodies produce a generic safe message; raw
-bodies, tokens, and transport causes are not copied into the message or JSON
-representation.
+`param`, `status`, and scalar `extras`. Known request/retry fields are typed,
+and other scalar CAIL fields remain available through the same scalar value
+contract. A valid CAIL envelope keeps its message. Malformed or non-JSON
+bodies produce a generic safe message; raw bodies, tokens, and transport
+causes are not copied into the message or JSON representation.
 
 ```ts
 import { CailError, extractCailError } from "@cuny-ai-lab/cail-client";

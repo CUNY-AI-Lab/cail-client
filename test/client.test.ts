@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { CailError, createCailClient } from "../src/index.js";
-import type { CailCorrelation, CailMetadata } from "../src/index.js";
+import type { CailClientOptions, CailCorrelation, CailMetadata } from "../src/index.js";
 import { cailErrorResponse, quotaSnapshotResponse } from "../src/testing.js";
 
 const BASE = "https://gateway.example/api";
@@ -209,6 +209,19 @@ describe("CAIL Gateway transport", () => {
     expect(requestError).toMatchObject({ code: "invalid_request", status: 0 });
     expect(requestError instanceof Error ? requestError.message : "").not.toContain("PRIVATE_RUN_DESCRIPTOR");
     expect(recorded.calls).toHaveLength(0);
+  });
+
+  it("rejects an explicitly supplied non-callable fetch implementation", () => {
+    const invalidOptions: CailClientOptions = { baseUrl: BASE, app: "test-app" };
+    Object.defineProperty(invalidOptions, "fetchImpl", { enumerable: true, value: "not-a-fetch" });
+    let error: Error | undefined;
+    try {
+      createCailClient(invalidOptions);
+    } catch (caught) {
+      if (caught instanceof Error) error = caught;
+    }
+    expect(error).toMatchObject({ code: "invalid_config", status: 0 });
+    expect(error?.message).toBe("No fetch implementation is available.");
   });
 
   it("rejects non-canonical correlation IDs and tracestate", async () => {

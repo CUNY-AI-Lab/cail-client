@@ -84,8 +84,9 @@ export type CailJsonValue =
   | number
   | boolean
   | null
+  | undefined
   | CailJsonObject
-  | CailJsonValue[];
+  | ReadonlyArray<CailJsonValue>;
 
 export interface CailJsonObject {
   [key: string]: CailJsonValue;
@@ -419,7 +420,15 @@ function baseUrlFrom<Value>(options: Value): BaseUrlConfig {
   if (onAuthRequired !== undefined && authCallback === undefined) {
     throw invalid("`onAuthRequired` must be a function when present.", "invalid_config");
   }
-  const fetchCandidate = callableFrom(fields.read("fetchImpl"));
+  const fetchProperty = fields.property("fetchImpl");
+  if (fetchProperty.present && !fetchProperty.readable) {
+    throw invalid("No fetch implementation is available.", "invalid_config");
+  }
+  const fetchConfigured = fetchProperty.value;
+  const fetchCandidate = callableFrom(fetchConfigured);
+  if (fetchConfigured !== undefined && fetchCandidate === undefined) {
+    throw invalid("No fetch implementation is available.", "invalid_config");
+  }
   const fetchValue = fetchCandidate ?? globalThis.fetch;
   if (callableFrom(fetchValue) === undefined) throw invalid("No fetch implementation is available.", "invalid_config");
   // SAFETY: callableFrom established the fetch implementation's callability;

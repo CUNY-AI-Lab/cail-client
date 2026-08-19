@@ -14,7 +14,10 @@ const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[
 
 const liveErrors = new WeakMap<object, CailError>();
 
+export type CailErrorExtraValue = string | number | boolean | null | undefined;
+
 export interface CailErrorExtras {
+  [key: string]: CailErrorExtraValue;
   request_id?: string;
   should_retry?: boolean;
   retry_after?: string;
