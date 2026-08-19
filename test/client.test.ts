@@ -166,6 +166,51 @@ describe("CAIL Gateway transport", () => {
     expect(headers.get("x-cail-request-id")).toBe("019f8bdc-342a-76e1-ba71-005d69808f86");
   });
 
+  it("contains descriptor traps at client request boundaries", async () => {
+    const optionsProxy = new Proxy({ baseUrl: BASE, app: "test-app" }, {
+      getOwnPropertyDescriptor() {
+        throw new Error("PRIVATE_OPTIONS_DESCRIPTOR");
+      },
+    });
+    let optionsError: Error | undefined;
+    try {
+      createCailClient(optionsProxy);
+    } catch (error) {
+      if (error instanceof Error) optionsError = error;
+    }
+    expect(optionsError).toBeInstanceOf(CailError);
+    expect(optionsError?.message).not.toContain("PRIVATE_OPTIONS_DESCRIPTOR");
+
+    const recorded = client(new Response("ok", { status: 200 }));
+    const credentialProxy = new Proxy({ kind: "key" as const, token: "key-token" }, {
+      getOwnPropertyDescriptor() {
+        throw new Error("PRIVATE_CREDENTIAL_DESCRIPTOR");
+      },
+    });
+    const credentialError = await recorded.client.getQuota(credentialProxy).catch((error) => error);
+    expect(credentialError).toMatchObject({ code: "invalid_credential", status: 0 });
+    expect(credentialError instanceof Error ? credentialError.message : "").not.toContain("PRIVATE_CREDENTIAL_DESCRIPTOR");
+
+    const initProxy = new Proxy<RequestInit>({ method: "GET" }, {
+      getOwnPropertyDescriptor() {
+        throw new Error("PRIVATE_INIT_DESCRIPTOR");
+      },
+    });
+    const initError = await recorded.client.call("/v1/models", initProxy, "key-token").catch((error) => error);
+    expect(initError).toMatchObject({ code: "invalid_request", status: 0 });
+    expect(initError instanceof Error ? initError.message : "").not.toContain("PRIVATE_INIT_DESCRIPTOR");
+
+    const requestProxy = new Proxy({ model: "gpt-test", input: { prompt: "hello" } }, {
+      getOwnPropertyDescriptor() {
+        throw new Error("PRIVATE_RUN_DESCRIPTOR");
+      },
+    });
+    const requestError = await recorded.client.run(requestProxy, "key-token").catch((error) => error);
+    expect(requestError).toMatchObject({ code: "invalid_request", status: 0 });
+    expect(requestError instanceof Error ? requestError.message : "").not.toContain("PRIVATE_RUN_DESCRIPTOR");
+    expect(recorded.calls).toHaveLength(0);
+  });
+
   it("rejects non-canonical correlation IDs and tracestate", async () => {
     const recorded = client(new Response("ok", { status: 200 }));
     const baseCorrelation = {

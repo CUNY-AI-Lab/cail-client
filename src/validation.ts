@@ -58,11 +58,15 @@ export function plainRecordFrom<Value>(value: Value): RecordSnapshot | undefined
     // callable and array values were rejected immediately above.
     const owner = value as object;
     const property = (key: string): PropertySnapshot => {
-      const descriptor = Object.getOwnPropertyDescriptor(owner, key);
-      if (descriptor === undefined) return { present: false, readable: false, enumerable: false };
-      const enumerable = descriptor.enumerable === true;
-      if (!("value" in descriptor)) return { present: true, readable: false, enumerable };
-      return { present: true, readable: true, enumerable, value: descriptor.value };
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(owner, key);
+        if (descriptor === undefined) return { present: false, readable: false, enumerable: false };
+        const enumerable = descriptor.enumerable === true;
+        if (!("value" in descriptor)) return { present: true, readable: false, enumerable };
+        return { present: true, readable: true, enumerable, value: descriptor.value };
+      } catch {
+        return { present: true, readable: false, enumerable: false };
+      }
     };
     return Object.freeze({
       has(key: string): boolean {
@@ -73,8 +77,12 @@ export function plainRecordFrom<Value>(value: Value): RecordSnapshot | undefined
       },
       property,
       read(key: string): RuntimeProperty {
-        const item = property(key);
-        return item.readable ? item.value : undefined;
+        try {
+          const item = property(key);
+          return item.readable ? item.value : undefined;
+        } catch {
+          return undefined;
+        }
       },
     });
   } catch {

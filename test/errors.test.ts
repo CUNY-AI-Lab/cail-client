@@ -147,6 +147,14 @@ describe("CAIL errors", () => {
     expect(extractCailError(hostile)).toBeNull();
     expect(getterCalled).toBe(false);
 
+    const descriptorTrapped = new Proxy({ error: envelope.error }, {
+      getOwnPropertyDescriptor() {
+        throw new Error("PRIVATE_EXTRACT_DESCRIPTOR");
+      },
+    });
+    expect(() => extractCailError(descriptorTrapped)).not.toThrow();
+    expect(extractCailError(descriptorTrapped)).toBeNull();
+
     const pollutedExtras = Object.create(null);
     Object.defineProperty(pollutedExtras, "__proto__", {
       enumerable: true,

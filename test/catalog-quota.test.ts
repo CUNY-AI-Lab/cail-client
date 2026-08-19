@@ -138,5 +138,19 @@ describe("public catalog and quota parsers", () => {
       },
     });
     expect(parseCailQuotaSnapshot(trapped)).toMatchObject({ estimated_remaining: 800 });
+
+    const descriptorTrapped = new Proxy({ ...validQuota }, {
+      getOwnPropertyDescriptor() {
+        throw new Error("PRIVATE_QUOTA_DESCRIPTOR");
+      },
+    });
+    let quotaError: Error | undefined;
+    try {
+      parseCailQuotaSnapshot(descriptorTrapped);
+    } catch (error) {
+      if (error instanceof Error) quotaError = error;
+    }
+    expect(quotaError).toBeInstanceOf(CailError);
+    expect(quotaError?.message).not.toContain("PRIVATE_QUOTA_DESCRIPTOR");
   });
 });
