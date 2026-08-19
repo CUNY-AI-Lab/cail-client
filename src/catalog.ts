@@ -1,4 +1,13 @@
 import { bodyError, CailError } from "./errors.js";
+import {
+  arrayItemsFrom,
+  booleanFrom,
+  hasControlCharacters,
+  numberFrom,
+  plainRecordFrom,
+  stringFrom,
+} from "./validation.js";
+import type { RuntimeProperty } from "./validation.js";
 
 export type CailModelTier = "recommended" | "advanced";
 export type CailModelStatus = "active" | "deprecated" | "retiring";
@@ -34,147 +43,148 @@ export interface CailModelCatalog {
 
 export type CailCatalogModality = "text" | "image" | "all";
 
-const CONTROL_CHARACTERS = /[\x00-\x1f\x7f]/;
-const TIERS = new Set<CailModelTier>(["recommended", "advanced"]);
-const STATUSES = new Set<CailModelStatus>(["active", "deprecated", "retiring"]);
-const MODALITIES = new Set<CailModelModality>(["text", "image"]);
-const PROVIDERS = new Set<CailModelProvider>(["workers-ai", "openrouter"]);
-const PRICING = new Set<CailPricingState>(["catalog", "verified-live"]);
-
-function own(value: object, key: string): unknown {
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
-  } catch {
-    return undefined;
-  }
+function text<Value>(value: Value): string | undefined {
+  const item = stringFrom(value);
+  return item !== undefined && item.length > 0 && !hasControlCharacters(item)
+    ? item
+    : undefined;
 }
 
-function record(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object") return false;
-  try {
-    return !Array.isArray(value);
-  } catch {
-    return false;
-  }
+function tierFrom<Value>(value: Value): CailModelTier | undefined {
+  const item = stringFrom(value);
+  return item === "recommended" || item === "advanced" ? item : undefined;
 }
 
-function text(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && !CONTROL_CHARACTERS.test(value);
+function statusFrom<Value>(value: Value): CailModelStatus | undefined {
+  const item = stringFrom(value);
+  return item === "active" || item === "deprecated" || item === "retiring"
+    ? item
+    : undefined;
 }
 
-function optionalText(value: unknown): value is string | undefined {
-  return value === undefined || text(value);
+function modalityFrom<Value>(value: Value): CailModelModality | undefined {
+  const item = stringFrom(value);
+  return item === "text" || item === "image" ? item : undefined;
 }
 
-function values(value: unknown): unknown[] | null {
-  if (value === null || typeof value !== "object") return null;
-  try {
-    if (!Array.isArray(value)) return null;
-    const descriptors = Object.getOwnPropertyDescriptors(value as object);
-    const lengthDescriptor = descriptors["length"];
-    if (
-      lengthDescriptor === undefined ||
-      !("value" in lengthDescriptor) ||
-      typeof lengthDescriptor.value !== "number" ||
-      !Number.isSafeInteger(lengthDescriptor.value) ||
-      lengthDescriptor.value < 0
-    ) return null;
-    const length = lengthDescriptor.value;
-    const result: unknown[] = [];
-    for (let index = 0; index < length; index += 1) {
-      const descriptor = descriptors[String(index)];
-      if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor)) return null;
-      result.push(descriptor.value);
-    }
-    for (const [key, descriptor] of Object.entries(descriptors)) {
-      if (key === "length") continue;
-      if (!/^(?:0|[1-9]\d*)$/.test(key) || Number(key) >= length || !descriptor.enumerable || !("value" in descriptor)) {
-        return null;
-      }
-    }
-    return result;
-  } catch {
-    return null;
-  }
+function providerFrom<Value>(value: Value): CailModelProvider | undefined {
+  const item = stringFrom(value);
+  return item === "workers-ai" || item === "openrouter" ? item : undefined;
 }
 
-function parseEntry(value: unknown, status: number): CailModelCatalogEntry {
-  if (!record(value)) throw bodyError(status, "catalog");
-  const id = own(value, "id");
-  const tier = own(value, "tier");
-  const modelStatus = own(value, "status");
-  const modality = own(value, "modality");
-  const provider = own(value, "provider");
-  const pricing = own(value, "pricing_known");
-  const capabilities = values(own(value, "capabilities"));
-  const contextLength = own(value, "context_length");
-  const registryUrl = own(value, "registry_url");
-  const sunset = own(value, "sunset");
-  const order = own(value, "order");
-  const recommended = own(value, "recommended");
-  const upstream = own(value, "upstream_model");
-  const streaming = own(value, "streaming");
+function pricingFrom<Value>(value: Value): CailPricingState | undefined {
+  const item = stringFrom(value);
+  return item === "catalog" || item === "verified-live" ? item : undefined;
+}
+
+type OptionalTextResult = { valid: boolean; text?: string };
+
+function optionalTextValid(value: RuntimeProperty): OptionalTextResult {
+  if (value === undefined) return { valid: true };
+  const item = text(value);
+  return item === undefined ? { valid: false } : { valid: true, text: item };
+}
+
+function parseEntry<Value>(value: Value, status: number): CailModelCatalogEntry {
+  const fields = plainRecordFrom(value);
+  if (fields === undefined) throw bodyError(status, "catalog");
+
+  const id = text(fields.read("id"));
+  const tier = tierFrom(fields.read("tier"));
+  const modelStatus = statusFrom(fields.read("status"));
+  const modality = modalityFrom(fields.read("modality"));
+  const provider = providerFrom(fields.read("provider"));
+  const pricing = pricingFrom(fields.read("pricing_known"));
+  const capabilities = arrayItemsFrom(fields.read("capabilities"));
+  const contextLengthRaw = fields.read("context_length");
+  const contextLength = numberFrom(contextLengthRaw);
+  const parsedContextLength = contextLengthRaw === null ? null : contextLength;
+  const registryUrlRaw = fields.read("registry_url");
+  const registryUrl = stringFrom(registryUrlRaw);
+  const parsedRegistryUrl = registryUrlRaw === null ? null : registryUrl;
+  const sunsetRaw = fields.read("sunset");
+  const sunset = stringFrom(sunsetRaw);
+  const parsedSunset = sunsetRaw === null ? null : sunset;
+  const order = numberFrom(fields.read("order"));
+  const recommended = booleanFrom(fields.read("recommended"));
+  const upstream = text(fields.read("upstream_model"));
+  const streaming = booleanFrom(fields.read("streaming"));
   const capabilitySet = new Set<string>();
   const parsedCapabilities = capabilities?.map((item) => {
-    if (!text(item) || capabilitySet.has(item)) throw bodyError(status, "catalog");
-    capabilitySet.add(item);
-    return item;
+    const capability = text(item);
+    if (capability === undefined || capabilitySet.has(capability)) {
+      throw bodyError(status, "catalog");
+    }
+    capabilitySet.add(capability);
+    return capability;
   });
+  const name = optionalTextValid(fields.read("name"));
+  const description = optionalTextValid(fields.read("description"));
+  const task = optionalTextValid(fields.read("task"));
+
   if (
-    !text(id) ||
-    own(value, "object") !== "model" ||
-    typeof recommended !== "boolean" ||
-    typeof tier !== "string" || !TIERS.has(tier as CailModelTier) ||
+    id === undefined ||
+    fields.read("object") !== "model" ||
+    recommended === undefined ||
+    tier === undefined ||
     recommended !== (tier === "recommended") ||
-    typeof order !== "number" || !Number.isSafeInteger(order) || order < 0 ||
-    typeof modelStatus !== "string" || !STATUSES.has(modelStatus as CailModelStatus) ||
-    typeof modality !== "string" || !MODALITIES.has(modality as CailModelModality) ||
-    typeof provider !== "string" || !PROVIDERS.has(provider as CailModelProvider) ||
-    !text(upstream) ||
-    typeof pricing !== "string" || !PRICING.has(pricing as CailPricingState) ||
-    typeof streaming !== "boolean" ||
-    (sunset !== null && (typeof sunset !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(sunset))) ||
+    order === undefined ||
+    !Number.isSafeInteger(order) ||
+    order < 0 ||
+    modelStatus === undefined ||
+    modality === undefined ||
+    provider === undefined ||
+    upstream === undefined ||
+    pricing === undefined ||
+    streaming === undefined ||
+    parsedSunset === undefined ||
+    (parsedSunset !== null && !/^\d{4}-\d{2}-\d{2}$/.test(parsedSunset)) ||
     parsedCapabilities === undefined ||
-    (contextLength !== null && (typeof contextLength !== "number" || !Number.isSafeInteger(contextLength) || contextLength < 1)) ||
-    (registryUrl !== null && (typeof registryUrl !== "string" || !registryUrl.startsWith("https://") || CONTROL_CHARACTERS.test(registryUrl))) ||
-    !optionalText(own(value, "name")) ||
-    !optionalText(own(value, "description")) ||
-    !optionalText(own(value, "task"))
+    parsedContextLength === undefined ||
+    (parsedContextLength !== null &&
+      (!Number.isSafeInteger(parsedContextLength) || parsedContextLength < 1)) ||
+    parsedRegistryUrl === undefined ||
+    (parsedRegistryUrl !== null &&
+      (!parsedRegistryUrl.startsWith("https://") ||
+        hasControlCharacters(parsedRegistryUrl))) ||
+    !name.valid ||
+    !description.valid ||
+    !task.valid
   ) {
     throw bodyError(status, "catalog");
   }
+
   const result: CailModelCatalogEntry = {
     id,
     object: "model",
     recommended,
-    tier: tier as CailModelTier,
+    tier,
     order,
-    status: modelStatus as CailModelStatus,
-    modality: modality as CailModelModality,
-    provider: provider as CailModelProvider,
+    status: modelStatus,
+    modality,
+    provider,
     upstream_model: upstream,
-    pricing_known: pricing as CailPricingState,
+    pricing_known: pricing,
     streaming,
-    sunset,
+    sunset: parsedSunset,
     capabilities: parsedCapabilities,
-    context_length: contextLength,
-    registry_url: registryUrl,
+    context_length: parsedContextLength,
+    registry_url: parsedRegistryUrl,
   };
-  const name = own(value, "name");
-  const description = own(value, "description");
-  const task = own(value, "task");
-  if (typeof name === "string") result.name = name;
-  if (typeof description === "string") result.description = description;
-  if (typeof task === "string") result.task = task;
+  if (name.text !== undefined) result.name = name.text;
+  if (description.text !== undefined) result.description = description.text;
+  if (task.text !== undefined) result.task = task.text;
   return result;
 }
 
-export function parseCailModelCatalog(value: unknown, status = 200): CailModelCatalog {
+export function parseCailModelCatalog<Value>(value: Value, status = 200): CailModelCatalog {
   try {
-    if (!record(value) || own(value, "object") !== "list") throw bodyError(status, "catalog");
-    const data = values(own(value, "data"));
-    if (data === null) throw bodyError(status, "catalog");
+    const fields = plainRecordFrom(value);
+    if (fields === undefined || fields.read("object") !== "list") {
+      throw bodyError(status, "catalog");
+    }
+    const data = arrayItemsFrom(fields.read("data"));
+    if (data === undefined) throw bodyError(status, "catalog");
     const ids = new Set<string>();
     const parsed = data.map((entry) => {
       const item = parseEntry(entry, status);

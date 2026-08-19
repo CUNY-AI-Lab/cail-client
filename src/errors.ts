@@ -1,7 +1,29 @@
-const CONTROL_CHARACTERS = /[\x00-\x1f\x7f]/;
+import {
+  arrayItemsFrom,
+  booleanFrom,
+  callableFrom,
+  hasControlCharacters,
+  numberFrom,
+  plainRecordFrom,
+  propertyFrom,
+  referenceFrom,
+  stringFrom,
+} from "./validation.js";
+import type { RuntimeProperty } from "./validation.js";
+
 const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-const liveErrors = new WeakSet<object>();
+const liveErrors = new WeakMap<object, CailError>();
+
+export type CailErrorExtraValue = string | number | boolean | null | undefined;
+
+export interface CailErrorExtras {
+  [key: string]: CailErrorExtraValue;
+  request_id?: string;
+  should_retry?: boolean;
+  retry_after?: string;
+  retry_after_seconds?: number;
+}
 
 /** A safe, typed error returned by the CAIL Gateway or transport boundary. */
 export class CailError extends Error {
@@ -9,13 +31,13 @@ export class CailError extends Error {
   readonly type: string;
   readonly param: string | null;
   readonly status: number;
-  readonly extras: Record<string, unknown>;
+  readonly extras: CailErrorExtras;
 
   constructor(
     code: string,
     message: string,
     status: number,
-    extras: Record<string, unknown> = {},
+    extras: CailErrorExtras = {},
     type = "unknown_error",
     param: string | null = null,
   ) {
@@ -27,40 +49,23 @@ export class CailError extends Error {
     this.status = status;
     this.extras = extras;
     Object.setPrototypeOf(this, CailError.prototype);
-    liveErrors.add(this);
+    liveErrors.set(this, this);
   }
 }
 
-function own(value: object, key: string): unknown {
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return descriptor !== undefined && "value" in descriptor
-      ? descriptor.value
-      : undefined;
-  } catch {
-    return undefined;
-  }
+function own<Value>(value: Value, key: string): RuntimeProperty {
+  const property = propertyFrom(value, key);
+  return property.readable ? property.value : undefined;
 }
 
-function ownProperty(value: object, key: string): { found: boolean; value?: unknown } {
+function entries<Value>(value: Value): Array<[string, RuntimeProperty]> | null {
+  const fields = plainRecordFrom(value);
+  if (fields === undefined) return null;
   try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return descriptor !== undefined && "value" in descriptor
-      ? { found: true, value: descriptor.value }
-      : { found: false };
-  } catch {
-    return { found: false };
-  }
-}
-
-function entries(value: object): Array<[string, unknown]> | null {
-  try {
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    const result: Array<[string, unknown]> = [];
-    for (const [key, descriptor] of Object.entries(descriptors)) {
-      if (descriptor.enumerable && "value" in descriptor) {
-        result.push([key, descriptor.value]);
-      }
+    const result: Array<[string, RuntimeProperty]> = [];
+    for (const key of fields.names()) {
+      const descriptor = fields.property(key);
+      if (descriptor.readable && descriptor.enumerable) result.push([key, descriptor.value]);
     }
     return result;
   } catch {
@@ -69,25 +74,21 @@ function entries(value: object): Array<[string, unknown]> | null {
 }
 
 /** Copy only scalar CAIL extras, never nested bodies or prototype keys. */
-function scalarExtras(value: unknown): Record<string, unknown> | null {
-  if (value === null || typeof value !== "object") return null;
-  try {
-    if (Array.isArray(value)) return null;
-  } catch {
-    return null;
-  }
+function scalarExtras<Value>(value: Value): CailErrorExtras | null {
   const pairs = entries(value);
   if (pairs === null) return null;
-  const result: Record<string, unknown> = {};
+  const result: CailErrorExtras = {};
   for (const [key, item] of pairs) {
+    const scalar =
+      item === null ||
+      stringFrom(item) !== undefined ||
+      numberFrom(item) !== undefined ||
+      booleanFrom(item) !== undefined;
     if (
       key === "__proto__" ||
       key === "constructor" ||
       key === "prototype" ||
-      (item !== null &&
-        typeof item !== "string" &&
-        typeof item !== "number" &&
-        typeof item !== "boolean")
+      !scalar
     ) {
       return null;
     }
@@ -101,7 +102,7 @@ function scalarExtras(value: unknown): Record<string, unknown> | null {
   return result;
 }
 
-function responseMetadata(response: Response, extras: Record<string, unknown>): void {
+function responseMetadata(response: Response, extras: CailErrorExtras): void {
   const requestId = response.headers.get("x-request-id");
   if (requestId !== null && REQUEST_ID.test(requestId)) extras.request_id = requestId;
   const shouldRetry = response.headers.get("x-should-retry")?.trim().toLowerCase();
@@ -109,27 +110,17 @@ function responseMetadata(response: Response, extras: Record<string, unknown>): 
     extras.should_retry = shouldRetry === "true";
   }
   const retryAfter = response.headers.get("retry-after");
-  if (retryAfter !== null && !CONTROL_CHARACTERS.test(retryAfter)) {
+  if (retryAfter !== null && !hasControlCharacters(retryAfter)) {
     extras.retry_after = retryAfter;
   }
 }
 
 function unknownResponse(status: number): CailError {
   const message = `The CAIL backbone returned an unexpected response (status ${status}).`;
-  return new CailError(
-    "unknown_error",
-    message,
-    status,
-    {},
-    "unknown_error",
-    null,
-  );
+  return new CailError("unknown_error", message, status, {}, "unknown_error", null);
 }
 
-export function bodyError(
-  status: number,
-  kind: "catalog" | "quota",
-): CailError {
+export function bodyError(status: number, kind: "catalog" | "quota"): CailError {
   const label = kind === "catalog" ? "model catalog" : "quota";
   return new CailError(
     "unknown_error",
@@ -141,33 +132,41 @@ export function bodyError(
   );
 }
 
-function abortReason(signal: AbortSignal): unknown {
+function abortReason(signal: AbortSignal): RuntimeProperty {
   if (signal.reason !== undefined) return signal.reason;
-  if (typeof DOMException !== "undefined") {
-    return new DOMException("The operation was aborted.", "AbortError");
-  }
-  const error = new Error("The operation was aborted.");
-  error.name = "AbortError";
-  return error;
-}
-
-function isAbortError(value: unknown): boolean {
-  return value !== null && typeof value === "object" && own(value, "name") === "AbortError";
-}
-
-function isAbortSignal(value: unknown): value is AbortSignal {
   try {
-    if (value === null || typeof value !== "object") return false;
-    const candidate = value as {
-      aborted?: unknown;
-      addEventListener?: unknown;
-      removeEventListener?: unknown;
-      dispatchEvent?: unknown;
-    };
-    return typeof candidate.aborted === "boolean" &&
-      typeof candidate.addEventListener === "function" &&
-      typeof candidate.removeEventListener === "function" &&
-      typeof candidate.dispatchEvent === "function";
+    return new DOMException("The operation was aborted.", "AbortError");
+  } catch {
+    const error = new Error("The operation was aborted.");
+    error.name = "AbortError";
+    return error;
+  }
+}
+
+type AbortSignalMembers = {
+  aborted?: RuntimeProperty;
+  addEventListener?: RuntimeProperty;
+  removeEventListener?: RuntimeProperty;
+  dispatchEvent?: RuntimeProperty;
+};
+
+function isAbortError<Value>(value: Value): boolean {
+  return stringFrom(plainRecordFrom(value)?.read("name")) === "AbortError";
+}
+
+function isAbortSignal<Value>(value: Value): value is Value & AbortSignal {
+  try {
+    const reference = referenceFrom(value);
+    if (reference === undefined) return false;
+    // SAFETY: referenceFrom established a non-primitive identity; each
+    // structural member is validated before it is used as an AbortSignal.
+    const candidate = reference as AbortSignalMembers;
+    return (
+      booleanFrom(candidate.aborted) !== undefined &&
+      callableFrom(candidate.addEventListener) !== undefined &&
+      callableFrom(candidate.removeEventListener) !== undefined &&
+      callableFrom(candidate.dispatchEvent) !== undefined
+    );
   } catch {
     return false;
   }
@@ -197,10 +196,10 @@ export async function readText(response: Response, signal?: AbortSignal): Promis
 
   let cancelIssued = false;
   const cancelReader = () => {
-    if (cancelIssued) return;
+    if (cancelIssued || signal === undefined) return;
     cancelIssued = true;
     try {
-      void reader.cancel(abortReason(signal!)).catch(() => {});
+      void reader.cancel(abortReason(signal)).catch(() => {});
     } catch {
       // Cancellation is best-effort after the caller has already aborted.
     }
@@ -223,7 +222,7 @@ export async function readText(response: Response, signal?: AbortSignal): Promis
         signal.removeEventListener("abort", onAbort);
         resolve(result);
       };
-      const onReject = (error: unknown) => {
+      const onReject = <Value>(error: Value) => {
         if (settled) return;
         settled = true;
         signal.removeEventListener("abort", onAbort);
@@ -260,9 +259,7 @@ export async function readText(response: Response, signal?: AbortSignal): Promis
     if (isAbortError(error)) throw error;
     throw error;
   } finally {
-    if (signal?.aborted) {
-      cancelReader();
-    }
+    if (signal?.aborted) cancelReader();
     try {
       reader.releaseLock();
     } catch {
@@ -271,36 +268,26 @@ export async function readText(response: Response, signal?: AbortSignal): Promis
   }
 }
 
-function envelopeError(value: unknown, status: number): CailError | null {
-  if (value === null || typeof value !== "object") return null;
-  try {
-    if (Array.isArray(value)) return null;
-  } catch {
-    return null;
-  }
-  const message = own(value, "message");
-  const type = own(value, "type");
-  const code = own(value, "code");
-  const param = own(value, "param");
-  const cail = ownProperty(value, "cail");
-  const extras = cail.found ? scalarExtras(cail.value) : {};
+function envelopeError<Value>(value: Value, status: number): CailError | null {
+  const fields = plainRecordFrom(value);
+  if (fields === undefined) return null;
+  const message = stringFrom(fields.read("message"));
+  const type = stringFrom(fields.read("type"));
+  const code = stringFrom(fields.read("code"));
+  const paramValue = fields.read("param");
+  const param = paramValue === null ? null : stringFrom(paramValue);
+  const cail = fields.property("cail");
+  const extras = !cail.present || !cail.readable ? {} : scalarExtras(cail.value);
   if (
-    typeof message !== "string" ||
-    typeof type !== "string" ||
-    typeof code !== "string" ||
-    (param !== null && typeof param !== "string") ||
+    message === undefined ||
+    type === undefined ||
+    code === undefined ||
+    param === undefined ||
     extras === null
   ) {
     return null;
   }
-  return new CailError(
-    code,
-    message,
-    status,
-    extras,
-    type,
-    typeof param === "string" ? param : null,
-  );
+  return new CailError(code, message, status, extras, type, param);
 }
 
 /** Parse a non-success Gateway response without copying its raw body. */
@@ -308,7 +295,7 @@ export async function parseCailError(
   response: Response,
   signal?: AbortSignal,
 ): Promise<CailError> {
-  let parsed: unknown;
+  let parsed: RuntimeProperty | undefined;
   try {
     const text = await readText(response, signal);
     try {
@@ -322,9 +309,10 @@ export async function parseCailError(
     if (error instanceof CailError) throw error;
   }
 
-  if (parsed !== null && typeof parsed === "object") {
-    const nested = own(parsed, "error");
-    const error = nested !== undefined ? envelopeError(nested, response.status) : null;
+  const fields = plainRecordFrom(parsed);
+  if (fields !== undefined) {
+    const nested = fields.read("error");
+    const error = envelopeError(nested, response.status);
     if (error !== null) {
       responseMetadata(response, error.extras);
       return error;
@@ -335,49 +323,54 @@ export async function parseCailError(
   return error;
 }
 
-function parseJson(value: unknown): unknown {
-  if (typeof value !== "string") return value;
+function parseJson<Value>(value: Value): Value | RuntimeProperty {
+  const text = stringFrom(value);
+  if (text === undefined) return value;
   try {
-    return JSON.parse(value);
+    return JSON.parse(text);
   } catch {
     return value;
   }
 }
 
-function wrapperStatus(value: object, fallback: number): number {
+function wrapperStatus<Value>(value: Value, fallback: number): number {
+  const fields = plainRecordFrom(value);
+  if (fields === undefined) return fallback;
   for (const key of ["statusCode", "status"]) {
-    const status = own(value, key);
-    if (typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599) {
+    const status = numberFrom(fields.read(key));
+    if (status !== undefined && Number.isInteger(status) && status >= 100 && status <= 599) {
       return status;
     }
   }
   return fallback;
 }
 
-function wrapperHeaders(value: object): Record<string, unknown> {
-  const raw = own(value, "responseHeaders");
-  if (raw === null || typeof raw !== "object") return {};
+function wrapperHeaders<Value>(value: Value): CailErrorExtras {
+  const fields = plainRecordFrom(value);
+  if (fields === undefined) return {};
+  const raw = fields.read("responseHeaders");
+  if (raw === null || referenceFrom(raw) === undefined) return {};
   const get = (name: string): string | null => {
     try {
-      if (typeof Headers !== "undefined" && raw instanceof Headers) return raw.get(name);
+      if (raw instanceof Headers) return raw.get(name);
     } catch {
       return null;
     }
     const pairs = entries(raw);
     const pair = pairs?.find(([key]) => key.toLowerCase() === name);
-    return typeof pair?.[1] === "string" ? pair[1] : null;
+    return stringFrom(pair?.[1]) ?? null;
   };
-  const result: Record<string, unknown> = {};
+  const result: CailErrorExtras = {};
   const requestId = get("x-request-id");
   if (requestId !== null && REQUEST_ID.test(requestId)) result.request_id = requestId;
   const shouldRetry = get("x-should-retry")?.trim().toLowerCase();
   if (shouldRetry === "true" || shouldRetry === "false") result.should_retry = shouldRetry === "true";
   const retryAfter = get("retry-after");
-  if (retryAfter !== null && !CONTROL_CHARACTERS.test(retryAfter)) result.retry_after = retryAfter;
+  if (retryAfter !== null && !hasControlCharacters(retryAfter)) result.retry_after = retryAfter;
   return result;
 }
 
-function attachMetadata(error: CailError, metadata: Record<string, unknown>): CailError {
+function attachMetadata(error: CailError, metadata: CailErrorExtras): CailError {
   for (const [key, value] of Object.entries(metadata)) {
     if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
     try {
@@ -395,49 +388,75 @@ function attachMetadata(error: CailError, metadata: Record<string, unknown>): Ca
   return error;
 }
 
-function bareError(value: object, status: number): CailError | null {
-  const code = own(value, "code");
-  const message = own(value, "message");
-  const name = own(value, "name");
-  const cail = scalarExtras(own(value, "cail"));
-  const extras = scalarExtras(own(value, "extras"));
-  const type = own(value, "type");
-  const ownStatus = own(value, "status");
-  const marked = name === "CailError" || cail !== null || extras !== null ||
-    (typeof ownStatus === "number" && typeof type === "string");
-  if (!marked || typeof code !== "string" || typeof message !== "string") return null;
+function mergeExtras(first: CailErrorExtras, second: CailErrorExtras): CailErrorExtras {
+  const result: CailErrorExtras = {};
+  for (const source of [first, second]) {
+    for (const [key, value] of Object.entries(source)) {
+      Object.defineProperty(result, key, {
+        configurable: true,
+        enumerable: true,
+        value,
+        writable: true,
+      });
+    }
+  }
+  return result;
+}
+
+function bareError<Value>(value: Value, status: number): CailError | null {
+  const fields = plainRecordFrom(value);
+  if (fields === undefined) return null;
+  const code = stringFrom(fields.read("code"));
+  const message = stringFrom(fields.read("message"));
+  const name = stringFrom(fields.read("name"));
+  const cail = scalarExtras(fields.read("cail"));
+  const extras = scalarExtras(fields.read("extras"));
+  const type = stringFrom(fields.read("type"));
+  const ownStatus = numberFrom(fields.read("status"));
+  const marked =
+    name === "CailError" ||
+    cail !== null ||
+    extras !== null ||
+    (ownStatus !== undefined && type !== undefined);
+  if (!marked || code === undefined || message === undefined) return null;
+  const param = stringFrom(fields.read("param"));
+  const errorStatus =
+    ownStatus !== undefined && Number.isInteger(ownStatus) && ownStatus >= 0
+      ? ownStatus
+      : status;
   return new CailError(
     code,
     message,
-    typeof ownStatus === "number" && Number.isInteger(ownStatus) && ownStatus >= 0
-      ? ownStatus
-      : status,
-    { ...(cail ?? {}), ...(extras ?? {}) },
-    typeof type === "string" ? type : "unknown_error",
-    typeof own(value, "param") === "string" ? (own(value, "param") as string) : null,
+    errorStatus,
+    mergeExtras(cail ?? {}, extras ?? {}),
+    type ?? "unknown_error",
+    param ?? null,
   );
 }
 
+type WrapperEntry<Value> = {
+  value: Value | RuntimeProperty;
+  status: number;
+  metadata: CailErrorExtras;
+};
+
 /** Extract a CAIL envelope from already-buffered SDK wrapper layers. */
-export function extractCailError(value: unknown): CailError | null {
-  const queue: Array<{ value: unknown; status: number; metadata: Record<string, unknown> }> = [
-    { value, status: 0, metadata: {} },
-  ];
+export function extractCailError<Value>(value: Value): CailError | null {
+  const queue: Array<WrapperEntry<Value>> = [{ value, status: 0, metadata: {} }];
   const seen = new Set<object>();
   while (queue.length > 0) {
-    const entry = queue.shift()!;
+    const entry = queue.shift();
+    if (entry === undefined) break;
     const layer = parseJson(entry.value);
-    if ((typeof layer !== "object" && typeof layer !== "function") || layer === null || seen.has(layer)) {
-      continue;
-    }
-    seen.add(layer);
-    if (typeof layer === "object" && layer !== null && liveErrors.has(layer)) {
-      return attachMetadata(layer as CailError, entry.metadata);
-    }
+    const reference = referenceFrom(layer);
+    if (reference === undefined || seen.has(reference)) continue;
+    seen.add(reference);
+    const live = liveErrors.get(reference);
+    if (live !== undefined) return attachMetadata(live, entry.metadata);
     const status = wrapperStatus(layer, entry.status);
-    const metadata = { ...entry.metadata, ...wrapperHeaders(layer) };
+    const metadata = mergeExtras(entry.metadata, wrapperHeaders(layer));
     const nested = own(layer, "error");
-    const parsed = nested !== undefined ? envelopeError(nested, status) : null;
+    const parsed = envelopeError(nested, status);
     if (parsed !== null) return attachMetadata(parsed, metadata);
     const bare = bareError(layer, status);
     if (bare !== null) return attachMetadata(bare, metadata);
@@ -445,20 +464,9 @@ export function extractCailError(value: unknown): CailError | null {
       const child = own(layer, key);
       if (child !== undefined) queue.push({ value: child, status, metadata });
     }
-    const errors = own(layer, "errors");
-    if (errors !== null && typeof errors === "object") {
-      let length = 0;
-      try {
-        if (Array.isArray(errors) && typeof own(errors, "length") === "number") {
-          length = Math.max(0, Math.floor(own(errors, "length") as number));
-        }
-      } catch {
-        length = 0;
-      }
-      for (let index = 0; index < length; index += 1) {
-        const child = ownProperty(errors, String(index));
-        if (child.found) queue.push({ value: child.value, status, metadata });
-      }
+    const errors = arrayItemsFrom(own(layer, "errors"));
+    if (errors !== undefined) {
+      for (const child of errors) queue.push({ value: child, status, metadata });
     }
   }
   return null;
