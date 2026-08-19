@@ -56,5 +56,8 @@
   },
   "dependencies": {
     "zod": "4.4.3"
+  },
+  "overrides": {
+    "nanoid": "3.3.18"
   }
 }
