@@ -5,6 +5,7 @@ import {
   hasControlCharacters,
   numberFrom,
   plainRecordFrom,
+  propertyFrom,
   referenceFrom,
   stringFrom,
 } from "./validation.js";
@@ -53,7 +54,8 @@ export class CailError extends Error {
 }
 
 function own<Value>(value: Value, key: string): RuntimeProperty {
-  return plainRecordFrom(value)?.read(key);
+  const property = propertyFrom(value, key);
+  return property.readable ? property.value : undefined;
 }
 
 function entries<Value>(value: Value): Array<[string, RuntimeProperty]> | null {
@@ -154,10 +156,11 @@ function isAbortError<Value>(value: Value): boolean {
 
 function isAbortSignal<Value>(value: Value): value is Value & AbortSignal {
   try {
-    if (value === null || Object(value) !== value) return false;
-    // SAFETY: Object identity established that value is object-like; each
+    const reference = referenceFrom(value);
+    if (reference === undefined) return false;
+    // SAFETY: referenceFrom established a non-primitive identity; each
     // structural member is validated before it is used as an AbortSignal.
-    const candidate = value as AbortSignalMembers;
+    const candidate = reference as AbortSignalMembers;
     return (
       booleanFrom(candidate.aborted) !== undefined &&
       callableFrom(candidate.addEventListener) !== undefined &&

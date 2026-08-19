@@ -155,6 +155,10 @@ describe("CAIL errors", () => {
     expect(() => extractCailError(descriptorTrapped)).not.toThrow();
     expect(extractCailError(descriptorTrapped)).toBeNull();
 
+    function functionWrapper(): void {}
+    Object.defineProperty(functionWrapper, "error", { enumerable: true, value: envelope.error });
+    expect(extractCailError(functionWrapper)).toMatchObject({ code: "quota_exceeded", status: 0 });
+
     const pollutedExtras = Object.create(null);
     Object.defineProperty(pollutedExtras, "__proto__", {
       enumerable: true,

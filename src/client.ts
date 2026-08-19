@@ -16,6 +16,7 @@ import {
   numberFrom,
   plainRecordFrom,
   propertyFrom,
+  referenceFrom,
   stringFrom,
 } from "./validation.js";
 import type { RuntimeProperty } from "./validation.js";
@@ -293,10 +294,11 @@ type AbortSignalMembers = {
 
 function isAbortSignal<Value>(value: Value): value is Value & AbortSignal {
   try {
-    if (value === null || Object(value) !== value) return false;
-    // SAFETY: Object identity established that value is object-like; each
+    const reference = referenceFrom(value);
+    if (reference === undefined) return false;
+    // SAFETY: referenceFrom established a non-primitive identity; each
     // structural member is validated before it is used as an AbortSignal.
-    const candidate = value as AbortSignalMembers;
+    const candidate = reference as AbortSignalMembers;
     return booleanFrom(candidate.aborted) !== undefined &&
       callableFrom(candidate.addEventListener) !== undefined &&
       callableFrom(candidate.removeEventListener) !== undefined &&

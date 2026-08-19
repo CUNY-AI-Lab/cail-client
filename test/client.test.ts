@@ -319,6 +319,12 @@ describe("CAIL Gateway transport", () => {
       signal: fakeSignal,
     }).catch((error) => error);
     expect(signalError).toMatchObject({ code: "invalid_request", status: 0 });
+
+    const primitiveSignalOptions = Object.create(null);
+    primitiveSignalOptions.signal = "not-a-signal";
+    const primitiveSignalError = await recorded.client.call("/v1/models", { method: "GET" }, "key-token", primitiveSignalOptions)
+      .catch((error) => error);
+    expect(primitiveSignalError).toMatchObject({ code: "invalid_request", status: 0 });
     expect(recorded.calls).toHaveLength(0);
   });
 

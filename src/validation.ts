@@ -4,6 +4,7 @@ const BOOLEAN_SCHEMA = z.boolean();
 const CALLABLE_SCHEMA = z.function();
 const NUMBER_SCHEMA = z.number();
 const STRING_SCHEMA = z.string();
+const SYMBOL_SCHEMA = z.symbol();
 
 export type RuntimeProperty =
   | bigint
@@ -49,14 +50,30 @@ export function stringFrom<Value>(value: Value): string | undefined {
   return result.success ? result.data : undefined;
 }
 
+function symbolFrom<Value>(value: Value): symbol | undefined {
+  const result = SYMBOL_SCHEMA.safeParse(value);
+  return result.success ? result.data : undefined;
+}
+
+function objectIdentity<Value>(value: Value): object | undefined {
+  try {
+    if (symbolFrom(value) !== undefined) return undefined;
+    // SAFETY: WeakSet construction accepts only object/function identities;
+    // primitive inputs are rejected synchronously, and symbols are excluded above.
+    const candidate = value as object;
+    new WeakSet<object>([candidate]);
+    return candidate;
+  } catch {
+    return undefined;
+  }
+}
+
 export function plainRecordFrom<Value>(value: Value): RecordSnapshot | undefined {
   try {
-    if (value === null || Object(value) !== value || callableFrom(value) !== undefined || Array.isArray(value)) {
+    const owner = objectIdentity(value);
+    if (owner === undefined || callableFrom(value) !== undefined || Array.isArray(value)) {
       return undefined;
     }
-    // SAFETY: Object identity established that the original value is an object;
-    // callable and array values were rejected immediately above.
-    const owner = value as object;
     const property = (key: string): PropertySnapshot => {
       try {
         const descriptor = Object.getOwnPropertyDescriptor(owner, key);
@@ -93,19 +110,20 @@ export function plainRecordFrom<Value>(value: Value): RecordSnapshot | undefined
 export function propertyFrom<Value>(value: Value | undefined, key: string): PropertySnapshot {
   if (value === undefined) return { present: false, readable: false, enumerable: false };
   try {
-    return plainRecordFrom(value)?.property(key) ?? { present: true, readable: false, enumerable: false };
+    const owner = objectIdentity(value);
+    if (owner === undefined) return { present: true, readable: false, enumerable: false };
+    const descriptor = Object.getOwnPropertyDescriptor(owner, key);
+    if (descriptor === undefined) return { present: false, readable: false, enumerable: false };
+    const enumerable = descriptor.enumerable === true;
+    if (!("value" in descriptor)) return { present: true, readable: false, enumerable };
+    return { present: true, readable: true, enumerable, value: descriptor.value };
   } catch {
     return { present: true, readable: false, enumerable: false };
   }
 }
 
 export function referenceFrom<Value>(value: Value): object | undefined {
-  try {
-    if (value === null || Object(value) !== value) return undefined;
-    return Object(value);
-  } catch {
-    return undefined;
-  }
+  return objectIdentity(value);
 }
 
 export function arrayItemsFrom<Value>(value: Value): RuntimeProperty[] | undefined {
