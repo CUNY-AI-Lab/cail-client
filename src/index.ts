@@ -21,7 +21,11 @@ export type {
   CailQuotaState,
   CailQuotaWindowTechnique,
 } from "./quota.js";
-export { createCailClient } from "./client.js";
+export {
+  CAIL_GATEWAY_OPENAI_BASE_URL,
+  CAIL_GATEWAY_ORIGIN,
+  createCailClient,
+} from "./client.js";
 export type {
   CailCallOptions,
   CailCatalogOptions,

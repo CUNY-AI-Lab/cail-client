@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { CailError, createCailClient } from "../src/index.js";
+import {
+  CAIL_GATEWAY_OPENAI_BASE_URL,
+  CAIL_GATEWAY_ORIGIN,
+  CailError,
+  createCailClient,
+} from "../src/index.js";
 import type { CailClientOptions, CailCorrelation, CailMetadata } from "../src/index.js";
 import { cailErrorResponse, quotaSnapshotResponse } from "../src/testing.js";
 
@@ -63,6 +68,21 @@ function delayedBodyResponse(status: number): DelayedBodyResponse {
 }
 
 describe("CAIL Gateway transport", () => {
+  it("defaults to the canonical origin and joins /v1 endpoints once", async () => {
+    expect(CAIL_GATEWAY_ORIGIN).toBe("https://tools.ailab.gc.cuny.edu");
+    expect(CAIL_GATEWAY_OPENAI_BASE_URL).toBe(`${CAIL_GATEWAY_ORIGIN}/v1`);
+    const recorded = wire(new Response("ok", { status: 200 }));
+    const canonical = createCailClient({ app: "test-app", fetchImpl: recorded.fetch });
+
+    await canonical.call("/v1/models", { method: "GET" }, "key-token");
+    await canonical.chatCompletions({ model: "gpt-test", messages: [] }, "key-token");
+
+    expect(recorded.calls.map(({ url }) => url)).toEqual([
+      `${CAIL_GATEWAY_ORIGIN}/v1/models`,
+      `${CAIL_GATEWAY_ORIGIN}/v1/chat/completions`,
+    ]);
+  });
+
   it("validates the authority and permits explicit loopback HTTP", () => {
     for (const baseUrl of [
       "http://gateway.example",
@@ -523,6 +543,7 @@ describe("CAIL Gateway transport", () => {
       estimated_remaining: 9_370_000,
       remaining_percent: 94,
     });
+    expect(quota.calls[0]?.url).toBe(`${BASE}/v1/quota`);
   });
 
   it("rejects a run request whose own input value is undefined", async () => {
