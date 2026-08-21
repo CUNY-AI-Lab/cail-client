@@ -21,17 +21,24 @@ bun add @cuny-ai-lab/cail-client
 ## Client
 
 ```ts
-import { createCailClient } from "@cuny-ai-lab/cail-client";
+import {
+  CAIL_GATEWAY_OPENAI_BASE_URL,
+  createCailClient,
+} from "@cuny-ai-lab/cail-client";
 
 const cail = createCailClient({
-  baseUrl: CAIL_API_BASE,
   app: "alt-text",
 });
 ```
 
-`baseUrl` is an absolute HTTPS URL without credentials, a query, or a
-fragment. Local HTTP is available only for `localhost`, `127.0.0.1`, or
-`[::1]` with `allowInsecureLoopback: true`. The app is a lowercase slug.
+The client defaults to the canonical Gateway origin
+`https://tools.ailab.gc.cuny.edu`. `CAIL_GATEWAY_OPENAI_BASE_URL` is the full
+OpenAI-compatible base, `https://tools.ailab.gc.cuny.edu/v1`, for SDKs that
+need a URL. An explicit `baseUrl` remains available for a real custom Gateway
+origin (for example, a local loopback during development); it must be an
+absolute HTTPS URL without credentials, a query, or a fragment. Local HTTP is
+available only for `localhost`, `127.0.0.1`, or `[::1]` with
+`allowInsecureLoopback: true`. The app is a lowercase slug.
 
 Credentials can be passed as a key string shorthand or an explicit kind:
 
@@ -62,7 +69,7 @@ For an SDK that accepts a custom fetch function, use `chatFetch()`:
 
 ```ts
 const fetchChat = cail.chatFetch({ kind: "key", token: apiKey });
-const response = await fetchChat(`${CAIL_API_BASE}/v1/chat/completions`, {
+const response = await fetchChat(`${CAIL_GATEWAY_OPENAI_BASE_URL}/chat/completions`, {
   method: "POST",
   body: JSON.stringify({ model: selectedModel, messages }),
 });
@@ -78,7 +85,7 @@ for an SDK that understands `X-Should-Retry: false`.
 `run()` sends `{ model, input }` to `POST /v1/run` and returns the raw response.
 `getCatalog()` sends credential-free `GET /v1/catalog`; its optional modality
 is `text`, `image`, or `all`. `getCatalogSnapshot()` validates the enriched
-catalog. `getQuota()` sends authenticated `GET /quota` and validates the
+catalog. `getQuota()` sends authenticated `GET /v1/quota` and validates the
 Cloudflare-managed estimate (`microdollar` values, percentages, window
 metadata, and calculation time).
 

@@ -30,6 +30,9 @@ const TRACESTATE_MAX_MEMBERS = 32;
 const TRACESTATE_KEY = /^(?:[a-z][a-z0-9_*/-]{0,255}|[a-z0-9][a-z0-9_*/-]{0,240}@[a-z][a-z0-9_*/-]{0,13})$/;
 const TRACESTATE_VALUE = /^[\x20-\x2b\x2d-\x3c\x3e-\x7e]{0,255}[\x21-\x2b\x2d-\x3c\x3e-\x7e]$/;
 
+export const CAIL_GATEWAY_ORIGIN = "https://tools.ailab.gc.cuny.edu" as const;
+export const CAIL_GATEWAY_OPENAI_BASE_URL = `${CAIL_GATEWAY_ORIGIN}/v1` as const;
+
 export interface CailCorrelation {
   trace_id: string;
   span_id: string;
@@ -46,7 +49,7 @@ export type CailCredential =
 export type CailMetadata = Record<string, string | number>;
 
 export interface CailClientOptions {
-  baseUrl: string;
+  baseUrl?: string;
   app: string;
   fetchImpl?: typeof fetch;
   allowInsecureLoopback?: boolean;
@@ -377,7 +380,15 @@ function baseUrlFrom<Value>(options: Value): BaseUrlConfig {
   if (fields === undefined) {
     throw invalid("createCailClient requires an options object.", "invalid_config");
   }
-  const baseUrlValue = stringFrom(fields.read("baseUrl"));
+  const baseUrlProperty = fields.property("baseUrl");
+  let baseUrlValue: string | undefined;
+  if (!baseUrlProperty.present || (baseUrlProperty.readable && baseUrlProperty.value === undefined)) {
+    baseUrlValue = CAIL_GATEWAY_ORIGIN;
+  } else if (!baseUrlProperty.readable) {
+    baseUrlValue = undefined;
+  } else {
+    baseUrlValue = stringFrom(baseUrlProperty.value);
+  }
   if (
     baseUrlValue === undefined ||
     baseUrlValue.length === 0 ||
@@ -680,7 +691,7 @@ export function createCailClient(options: CailClientOptions): CailClient {
   async function getQuota(credential: CailCredentialInput, options?: CailQuotaOptions): Promise<CailQuotaSnapshot> {
     optionsOnly(options, "getQuota()");
     const signal = optionSignal(options);
-    const response = await transport(requestUrl(baseUrl, "/quota"), { method: "GET", headers: { accept: "application/json" } }, credential, signal === undefined ? undefined : { signal });
+    const response = await transport(requestUrl(baseUrl, "/v1/quota"), { method: "GET", headers: { accept: "application/json" } }, credential, signal === undefined ? undefined : { signal });
     try {
       return parseCailQuotaSnapshot(JSON.parse(await readText(response, signal)), response.status);
     } catch (error) {
