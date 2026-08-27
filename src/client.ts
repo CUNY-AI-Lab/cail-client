@@ -27,11 +27,13 @@ const TRACE_ID = /^(?!0{32})[0-9a-f]{32}$/;
 const SPAN_ID = /^(?!0{16})[0-9a-f]{16}$/;
 const TRACESTATE_MAX_CHARS = 512;
 const TRACESTATE_MAX_MEMBERS = 32;
+const SESSION_ID_MAXIMUM = 256;
 const TRACESTATE_KEY = /^(?:[a-z][a-z0-9_*/-]{0,255}|[a-z0-9][a-z0-9_*/-]{0,240}@[a-z][a-z0-9_*/-]{0,13})$/;
 const TRACESTATE_VALUE = /^[\x20-\x2b\x2d-\x3c\x3e-\x7e]{0,255}[\x21-\x2b\x2d-\x3c\x3e-\x7e]$/;
 
 export const CAIL_GATEWAY_ORIGIN = "https://tools.ailab.gc.cuny.edu" as const;
 export const CAIL_GATEWAY_OPENAI_BASE_URL = `${CAIL_GATEWAY_ORIGIN}/v1` as const;
+export const CAIL_SESSION_HEADER = "x-cail-session-id" as const;
 
 export interface CailCorrelation {
   trace_id: string;
@@ -62,7 +64,12 @@ export interface CailCallOptions {
   signal?: AbortSignal;
 }
 
-export interface CailChatFetchOptions extends CailCallOptions {
+export interface CailChatOptions extends CailCallOptions {
+  /** Stable per-conversation identifier sent as X-CAIL-Session-Id. */
+  sessionId?: string;
+}
+
+export interface CailChatFetchOptions extends CailChatOptions {
   nonRetryableErrorMode?: "throw" | "return";
 }
 
@@ -109,7 +116,7 @@ export interface CailClient {
   chatCompletions(
     request: CailChatRequest,
     credential: CailCredentialInput,
-    options?: CailCallOptions,
+    options?: CailChatOptions,
   ): Promise<Response>;
   chatFetch(
     credential: CailCredentialInput,
@@ -325,6 +332,25 @@ function optionSignal<Value>(options: Value | undefined): AbortSignal | undefine
   const value = property.value;
   if (value === undefined) return undefined;
   if (!isAbortSignal(value)) throw invalid("`signal` must be an AbortSignal when present.");
+  return value;
+}
+
+function chatSessionId<Value>(options: Value | undefined): string | undefined {
+  const raw = optionValue(options, "sessionId");
+  if (raw === undefined) return undefined;
+  const value = stringFrom(raw);
+  if (
+    value === undefined ||
+    value.length === 0 ||
+    value.length > SESSION_ID_MAXIMUM ||
+    value.trim() !== value ||
+    hasControlCharacters(value)
+  ) {
+    throw invalid(
+      "`sessionId` must be 1 to 256 characters without surrounding whitespace or control characters.",
+      "invalid_session_id",
+    );
+  }
   return value;
 }
 
@@ -729,8 +755,9 @@ export function createCailClient(options: CailClientOptions): CailClient {
     return transport(requestUrl(baseUrl, "/v1/run"), { method: "POST", headers: { "content-type": "application/json" }, body }, credential, options);
   }
 
-  async function chatCompletions(request: CailChatRequest, credential: CailCredentialInput, options?: CailCallOptions): Promise<Response> {
+  async function chatCompletions(request: CailChatRequest, credential: CailCredentialInput, options?: CailChatOptions): Promise<Response> {
     optionsOnly(options, "chatCompletions()");
+    const sessionId = chatSessionId(options);
     if (plainRecordFrom(request) === undefined) throw invalid("chatCompletions() requires a JSON object request.");
     let body: string;
     try {
@@ -739,11 +766,14 @@ export function createCailClient(options: CailClientOptions): CailClient {
       throw new CailError("invalid_request", "chatCompletions() request must be JSON-serializable.", 0, {}, "invalid_request");
     }
     if (body === undefined) throw invalid("chatCompletions() request must be JSON-serializable.");
-    return transport(requestUrl(baseUrl, "/v1/chat/completions"), { method: "POST", headers: { "content-type": "application/json" }, body }, credential, options);
+    const headers = new Headers({ "content-type": "application/json" });
+    if (sessionId !== undefined) headers.set(CAIL_SESSION_HEADER, sessionId);
+    return transport(requestUrl(baseUrl, "/v1/chat/completions"), { method: "POST", headers, body }, credential, options);
   }
 
   function chatFetch(credential: CailCredentialInput, options?: CailChatFetchOptions): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
     optionsOnly(options, "chatFetch()");
+    const sessionId = chatSessionId(options);
     const modeValue = optionValue(options, "nonRetryableErrorMode");
     const mode = modeValue ?? "throw";
     if (mode !== "throw" && mode !== "return") throw invalid('`chatFetch()` nonRetryableErrorMode must be "throw" or "return".');
@@ -764,10 +794,15 @@ export function createCailClient(options: CailClientOptions): CailClient {
       if (request.method.toUpperCase() !== "POST") throw invalid("chatFetch() requires method POST.");
       const requestInit: RequestInit & { duplex?: "half" } = {
         method: request.method,
-        headers: request.headers,
+        headers: new Headers(request.headers),
         body: request.body,
         signal: request.signal,
       };
+      if (sessionId !== undefined) {
+        const headers = new Headers(requestInit.headers);
+        headers.set(CAIL_SESSION_HEADER, sessionId);
+        requestInit.headers = headers;
+      }
       if (request.body !== null) requestInit.duplex = "half";
       return transport(target, requestInit, credential, options, mode === "return" ? "raw" : "chat");
     };

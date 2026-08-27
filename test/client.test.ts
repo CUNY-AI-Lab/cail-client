@@ -365,6 +365,46 @@ describe("CAIL Gateway transport", () => {
     });
   });
 
+  it("adds one validated conversation identifier to both chat transports", async () => {
+    const direct = client(new Response("ok", { status: 200 }));
+    await direct.client.chatCompletions(
+      { model: "gpt-test", messages: [] },
+      "key-token",
+      { sessionId: "conversation-123" },
+    );
+    expect(
+      new Headers(direct.calls[0]?.init.headers).get("x-cail-session-id"),
+    ).toBe("conversation-123");
+
+    const adapted = client(new Response("ok", { status: 200 }));
+    const fetchChat = adapted.client.chatFetch("key-token", {
+      sessionId: "conversation-456",
+    });
+    await fetchChat(CHAT, {
+      method: "POST",
+      headers: { "x-cail-session-id": "caller-value" },
+      body: JSON.stringify({ model: "gpt-test", messages: [] }),
+    });
+    expect(
+      new Headers(adapted.calls[0]?.init.headers).get("x-cail-session-id"),
+    ).toBe("conversation-456");
+  });
+
+  it.each(["", " conversation", "conversation ", "line\nbreak", "x".repeat(257)])(
+    "rejects invalid chat session id %j before fetch",
+    async (sessionId) => {
+      const recorded = client(new Response("ok", { status: 200 }));
+      await expect(
+        recorded.client.chatCompletions(
+          { model: "gpt-test", messages: [] },
+          "key-token",
+          { sessionId },
+        ),
+      ).rejects.toMatchObject({ code: "invalid_session_id", status: 0 });
+      expect(recorded.calls).toHaveLength(0);
+    },
+  );
+
   it("adapts chat SDK fetches without buffering successful responses or retrying", async () => {
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {

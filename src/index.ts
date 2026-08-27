@@ -24,12 +24,14 @@ export type {
 export {
   CAIL_GATEWAY_OPENAI_BASE_URL,
   CAIL_GATEWAY_ORIGIN,
+  CAIL_SESSION_HEADER,
   createCailClient,
 } from "./client.js";
 export type {
   CailCallOptions,
   CailCatalogOptions,
   CailChatFetchOptions,
+  CailChatOptions,
   CailChatRequest,
   CailClient,
   CailClientOptions,
