@@ -65,10 +65,31 @@ through unchanged. Successful `Response` objects are returned by reference.
 streaming response remains a live Web `Response`. The TypeScript request type
 models this JSON boundary without imposing a provider schema.
 
+Pass one stable identifier for each continuing conversation so the Gateway can
+keep provider-side session affinity without exposing that identifier upstream:
+
+```ts
+const response = await cail.chatCompletions(
+  { model: selectedModel, messages },
+  apiKey,
+  { sessionId: conversationId },
+);
+```
+
+Use the same value for every turn in one conversation and a different value for
+an independent conversation. Omit it for stateless calls. The value must be
+1–256 trimmed characters without controls. It is routing context, not a user id
+or credential; the Gateway combines it with the verified principal and hashes
+it before provider egress. It is a routing hint, not a keep-warm or latency
+guarantee.
+
 For an SDK that accepts a custom fetch function, use `chatFetch()`:
 
 ```ts
-const fetchChat = cail.chatFetch({ kind: "key", token: apiKey });
+const fetchChat = cail.chatFetch(
+  { kind: "key", token: apiKey },
+  { sessionId: conversationId },
+);
 const response = await fetchChat(`${CAIL_GATEWAY_OPENAI_BASE_URL}/chat/completions`, {
   method: "POST",
   body: JSON.stringify({ model: selectedModel, messages }),
