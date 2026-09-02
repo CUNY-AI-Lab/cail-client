@@ -616,6 +616,7 @@ export function createCailClient(options: CailClientOptions): CailClient {
     } catch {
       throw new CailError("invalid_request", "chatCompletions() request must be JSON-serializable.", 0, {}, "invalid_request");
     }
+    if (body === undefined) throw invalid("chatCompletions() request must be JSON-serializable.");
     const headers = new Headers({ "content-type": "application/json" });
     if (sessionId !== undefined) headers.set(CAIL_SESSION_HEADER, sessionId);
     return transport(`${baseUrl}/v1/chat/completions`, { method: "POST", headers, body }, credential, options);

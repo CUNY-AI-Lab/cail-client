@@ -6,6 +6,7 @@ import {
   createCailClient,
 } from "../src/index.js";
 import type { CailClientOptions } from "../src/index.js";
+import type { CailJsonObject } from "../src/client.js";
 import { cailErrorResponse, quotaSnapshotResponse } from "../src/testing.js";
 
 const BASE = "https://gateway.example/api";
@@ -233,6 +234,14 @@ describe("CAIL Gateway transport", () => {
     }).catch((error) => error);
     expect(correlationError).toMatchObject({ code: "invalid_correlation", status: 0 });
     expect(correlationError instanceof Error ? correlationError.message : "").not.toContain("PRIVATE_CORRELATION");
+    expect(recorded.calls).toHaveLength(0);
+  });
+
+  it("rejects a chat request that serializes to nothing", async () => {
+    const recorded = client(new Response("ok", { status: 200 }));
+    const request: CailJsonObject = { model: "gpt-test", messages: [] };
+    Object.assign(request, { toJSON: () => undefined });
+    await expect(recorded.client.chatCompletions(request, "key-token")).rejects.toMatchObject({ code: "invalid_request", status: 0 });
     expect(recorded.calls).toHaveLength(0);
   });
 
