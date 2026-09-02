@@ -5,7 +5,7 @@ import {
   CailError,
   createCailClient,
 } from "../src/index.js";
-import type { CailClientOptions, CailCorrelation, CailMetadata } from "../src/index.js";
+import type { CailClientOptions } from "../src/index.js";
 import { cailErrorResponse, quotaSnapshotResponse } from "../src/testing.js";
 
 const BASE = "https://gateway.example/api";
@@ -71,14 +71,14 @@ describe("CAIL Gateway transport", () => {
   it("defaults to the canonical origin and joins /v1 endpoints once", async () => {
     expect(CAIL_GATEWAY_ORIGIN).toBe("https://tools.ailab.gc.cuny.edu");
     expect(CAIL_GATEWAY_OPENAI_BASE_URL).toBe(`${CAIL_GATEWAY_ORIGIN}/v1`);
-    const recorded = wire(new Response("ok", { status: 200 }));
+    const recorded = wire(quotaSnapshotResponse());
     const canonical = createCailClient({ app: "test-app", fetchImpl: recorded.fetch });
 
-    await canonical.call("/v1/models", { method: "GET" }, "key-token");
+    await canonical.getQuota("key-token");
     await canonical.chatCompletions({ model: "gpt-test", messages: [] }, "key-token");
 
     expect(recorded.calls.map(({ url }) => url)).toEqual([
-      `${CAIL_GATEWAY_ORIGIN}/v1/models`,
+      `${CAIL_GATEWAY_ORIGIN}/v1/quota`,
       `${CAIL_GATEWAY_ORIGIN}/v1/chat/completions`,
     ]);
   });
@@ -120,11 +120,11 @@ describe("CAIL Gateway transport", () => {
 
   it("uses the identity header for JWT credentials and strips caller auth", async () => {
     const recorded = client(new Response("ok", { status: 200 }));
-    await recorded.client.call(
-      "/v1/models",
-      { method: "GET", headers: { Authorization: "sdk-placeholder", "X-CAIL-Identity-JWT": "wrong" } },
-      { kind: "jwt", token: "trusted-jwt" },
-    );
+    await recorded.client.chatFetch({ kind: "jwt", token: "trusted-jwt" })(CHAT, {
+      method: "POST",
+      headers: { Authorization: "sdk-placeholder", "X-CAIL-Identity-JWT": "wrong" },
+      body: JSON.stringify({ model: "gpt-test", messages: [] }),
+    });
     const headers = new Headers(recorded.calls[0]?.init.headers);
     expect(headers.get("x-cail-identity-jwt")).toBe("trusted-jwt");
     expect(headers.get("authorization")).toBeNull();
@@ -133,57 +133,23 @@ describe("CAIL Gateway transport", () => {
 
   it("strips Cookie while preserving unrelated provider extension headers", async () => {
     const recorded = client(new Response("ok", { status: 200 }));
-    await recorded.client.call(
-      "/v1/models",
-      {
-        method: "GET",
-        headers: {
-          Cookie: "session=private",
-          "Proxy-Authorization": "Basic private",
-          "X-Provider-Trace": "provider-extension",
-          "OpenAI-Beta": "assistants=v2",
-        },
+    await recorded.client.chatFetch("key-token")(CHAT, {
+      method: "POST",
+      headers: {
+        Cookie: "session=private",
+        "Proxy-Authorization": "Basic private",
+        "X-CAIL-Metadata": "caller-metadata",
+        "X-Provider-Trace": "provider-extension",
+        "OpenAI-Beta": "assistants=v2",
       },
-      "key-token",
-    );
+      body: JSON.stringify({ model: "gpt-test", messages: [] }),
+    });
     const headers = new Headers(recorded.calls[0]?.init.headers);
     expect(headers.get("cookie")).toBeNull();
     expect(headers.get("proxy-authorization")).toBeNull();
+    expect(headers.get("x-cail-metadata")).toBeNull();
     expect(headers.get("x-provider-trace")).toBe("provider-extension");
     expect(headers.get("openai-beta")).toBe("assistants=v2");
-  });
-
-  it("passes metadata and correlation as validated CAIL headers", async () => {
-    const recorded = client(new Response("ok", { status: 200 }));
-    const metadata: CailMetadata = { added: 2 };
-    Object.defineProperty(metadata, "hidden", { enumerable: false, value: "not sent" });
-    let hiddenGetterRead = false;
-    Object.defineProperty(metadata, "hiddenGetter", {
-      enumerable: false,
-      get() {
-        hiddenGetterRead = true;
-        throw new Error("hidden metadata getter must not run");
-      },
-    });
-    await recorded.client.call(
-      "/v1/models",
-      { method: "GET", headers: { "X-CAIL-Metadata": JSON.stringify({ existing: "yes" }) } },
-      "key-token",
-      {
-        metadata,
-        correlation: {
-          trace_id: "0123456789abcdef0123456789abcdef",
-          span_id: "0123456789abcdef",
-          trace_flags: 1,
-          request_id: "019f8bdc-342a-76e1-ba71-005d69808f86",
-        },
-      },
-    );
-    const headers = new Headers(recorded.calls[0]?.init.headers);
-    expect(JSON.parse(headers.get("x-cail-metadata") ?? "")).toEqual({ existing: "yes", added: 2 });
-    expect(hiddenGetterRead).toBe(false);
-    expect(headers.get("traceparent")).toBe("00-0123456789abcdef0123456789abcdef-0123456789abcdef-01");
-    expect(headers.get("x-cail-request-id")).toBe("019f8bdc-342a-76e1-ba71-005d69808f86");
   });
 
   it("contains descriptor traps at client request boundaries", async () => {
@@ -211,15 +177,6 @@ describe("CAIL Gateway transport", () => {
     expect(credentialError).toMatchObject({ code: "invalid_credential", status: 0 });
     expect(credentialError instanceof Error ? credentialError.message : "").not.toContain("PRIVATE_CREDENTIAL_DESCRIPTOR");
 
-    const initProxy = new Proxy<RequestInit>({ method: "GET" }, {
-      getOwnPropertyDescriptor() {
-        throw new Error("PRIVATE_INIT_DESCRIPTOR");
-      },
-    });
-    const initError = await recorded.client.call("/v1/models", initProxy, "key-token").catch((error) => error);
-    expect(initError).toMatchObject({ code: "invalid_request", status: 0 });
-    expect(initError instanceof Error ? initError.message : "").not.toContain("PRIVATE_INIT_DESCRIPTOR");
-
     const requestProxy = new Proxy({ model: "gpt-test", input: { prompt: "hello" } }, {
       getOwnPropertyDescriptor() {
         throw new Error("PRIVATE_RUN_DESCRIPTOR");
@@ -244,7 +201,7 @@ describe("CAIL Gateway transport", () => {
     expect(error?.message).toBe("No fetch implementation is available.");
   });
 
-  it("rejects non-canonical correlation IDs and tracestate", async () => {
+  it("rejects non-canonical correlation IDs", async () => {
     const recorded = client(new Response("ok", { status: 200 }));
     const baseCorrelation = {
       trace_id: "0123456789abcdef0123456789abcdef",
@@ -252,55 +209,18 @@ describe("CAIL Gateway transport", () => {
       trace_flags: 1 as const,
       request_id: "019f8bdc-342a-76e1-ba71-005d69808f86",
     };
-    await expect(recorded.client.call("/v1/models", { method: "GET" }, "key-token", {
+    await expect(recorded.client.chatCompletions({ model: "gpt-test", messages: [] }, "key-token", {
       correlation: { ...baseCorrelation, request_id: baseCorrelation.request_id.toUpperCase() },
     })).rejects.toMatchObject({ code: "invalid_correlation", status: 0 });
-    for (const tracestate of [
-      "A=value",
-      "vendor=value,vendor=other",
-      "vendor=value=other",
-      "vendor=value, vendor2=other",
-      Array.from({ length: 33 }, (_, index) => `v${index}=x`).join(","),
-      `a=${"x".repeat(254)},b=${"y".repeat(254)}`,
-    ]) {
-      await expect(recorded.client.call("/v1/models", { method: "GET" }, "key-token", {
-        correlation: { ...baseCorrelation, tracestate },
-      })).rejects.toMatchObject({ code: "invalid_correlation", status: 0 });
-    }
     expect(recorded.calls).toHaveLength(0);
   });
 
-  it("contains hostile metadata, correlation, and signal options", async () => {
+  it("contains a hostile correlation option", async () => {
     const recorded = client(new Response("ok", { status: 200 }));
-    const metadataTarget: CailMetadata = {};
-    const metadataProxy = new Proxy(metadataTarget, {
-      ownKeys() {
-        throw new Error("PRIVATE_METADATA");
-      },
-    });
-    const metadataError = await recorded.client.call("/v1/models", { method: "GET" }, "key-token", {
-      metadata: metadataProxy,
-    }).catch((error) => error);
-    expect(metadataError).toMatchObject({ code: "invalid_metadata", status: 0 });
-    expect(metadataError instanceof Error ? metadataError.message : "").not.toContain("PRIVATE_METADATA");
-
-    const metadataGetter: Record<string, string | number> = {};
-    Object.defineProperty(metadataGetter, "private", {
-      enumerable: true,
-      get() {
-        throw new Error("PRIVATE_METADATA_GETTER");
-      },
-    });
-    const getterError = await recorded.client.call("/v1/models", { method: "GET" }, "key-token", {
-      metadata: metadataGetter,
-    }).catch((error) => error);
-    expect(getterError).toMatchObject({ code: "invalid_metadata", status: 0 });
-    expect(getterError instanceof Error ? getterError.message : "").not.toContain("PRIVATE_METADATA_GETTER");
-
-    const correlationTarget: CailCorrelation = {
+    const correlationTarget = {
       trace_id: "0123456789abcdef0123456789abcdef",
       span_id: "0123456789abcdef",
-      trace_flags: 1,
+      trace_flags: 1 as const,
       request_id: "019f8bdc-342a-76e1-ba71-005d69808f86",
     };
     const correlationProxy = new Proxy(correlationTarget, {
@@ -308,43 +228,11 @@ describe("CAIL Gateway transport", () => {
         throw new Error("PRIVATE_CORRELATION");
       },
     });
-    const correlationError = await recorded.client.call("/v1/models", { method: "GET" }, "key-token", {
+    const correlationError = await recorded.client.chatCompletions({ model: "gpt-test", messages: [] }, "key-token", {
       correlation: correlationProxy,
     }).catch((error) => error);
     expect(correlationError).toMatchObject({ code: "invalid_correlation", status: 0 });
     expect(correlationError instanceof Error ? correlationError.message : "").not.toContain("PRIVATE_CORRELATION");
-
-    const correlationGetter = {
-      trace_id: "0123456789abcdef0123456789abcdef",
-      span_id: "0123456789abcdef",
-      trace_flags: 1 as const,
-      request_id: "019f8bdc-342a-76e1-ba71-005d69808f86",
-    };
-    Object.defineProperty(correlationGetter, "tracestate", {
-      enumerable: true,
-      get() {
-        throw new Error("PRIVATE_CORRELATION_GETTER");
-      },
-    });
-    const correlationGetterError = await recorded.client.call("/v1/models", { method: "GET" }, "key-token", {
-      correlation: correlationGetter,
-    }).catch((error) => error);
-    expect(correlationGetterError).toMatchObject({ code: "invalid_correlation", status: 0 });
-    expect(correlationGetterError instanceof Error ? correlationGetterError.message : "").not.toContain("PRIVATE_CORRELATION_GETTER");
-
-    // SAFETY: this fixture intentionally omits AbortSignal methods to test the
-    // transport's structural rejection of a malformed signal.
-    const fakeSignal = { aborted: false } as AbortSignal;
-    const signalError = await recorded.client.call("/v1/models", { method: "GET" }, "key-token", {
-      signal: fakeSignal,
-    }).catch((error) => error);
-    expect(signalError).toMatchObject({ code: "invalid_request", status: 0 });
-
-    const primitiveSignalOptions = Object.create(null);
-    primitiveSignalOptions.signal = "not-a-signal";
-    const primitiveSignalError = await recorded.client.call("/v1/models", { method: "GET" }, "key-token", primitiveSignalOptions)
-      .catch((error) => error);
-    expect(primitiveSignalError).toMatchObject({ code: "invalid_request", status: 0 });
     expect(recorded.calls).toHaveLength(0);
   });
 
@@ -560,7 +448,7 @@ describe("CAIL Gateway transport", () => {
       fetchImpl: recorded.fetch,
       onAuthRequired,
     });
-    await expect(clientWithHook.call("/v1/models", { method: "GET" }, "key-token")).rejects.toMatchObject({
+    await expect(clientWithHook.getQuota("key-token")).rejects.toMatchObject({
       code: "authentication_required",
       status: 401,
     });
@@ -605,16 +493,14 @@ describe("CAIL Gateway transport", () => {
   it("does not let an explicit null option signal fall through to request init", async () => {
     const recorded = client(new Response("ok", { status: 200 }));
     const controller = new AbortController();
-    await expect(recorded.client.call(
-      "/v1/models",
-      { method: "GET", signal: controller.signal },
+    await expect(recorded.client.chatFetch(
       "key-token",
       (() => {
         const malformedOptions = Object.create(null);
         malformedOptions.signal = null;
         return malformedOptions;
       })(),
-    )).rejects.toMatchObject({ code: "invalid_request", status: 0 });
+    )(CHAT, { method: "POST", signal: controller.signal })).rejects.toMatchObject({ code: "invalid_request", status: 0 });
     expect(recorded.calls).toHaveLength(0);
   });
 

@@ -1,46 +1,22 @@
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
 
-const root = resolve(import.meta.dir, "..");
-const textAuthorities = [
-  ".github",
-  ".gitignore",
-  ".npmrc",
-  "LICENSE",
-  "README.md",
-  "bun.lock",
-  "package.json",
-  "scripts",
-  "src",
-  "test",
-  "tsconfig.build.json",
-  "tsconfig.json",
-  "tsconfig.test.json",
-  "vitest.config.ts",
-];
-const failures: string[] = [];
+const result = spawnSync(
+  "sh",
+  [
+    "-c",
+    "git ls-files -z | xargs -0 sh -c 'for file; do if [ -f \"$file\" ]; then if grep -nH \"[[:blank:]]$\" \"$file\"; then :; else code=$?; if [ \"$code\" -gt 1 ]; then exit \"$code\"; fi; fi; fi; done' sh",
+  ],
+  {
+    cwd: resolve(import.meta.dir, ".."),
+    encoding: "utf8",
+  },
+);
 
-function scan(path: string): void {
-  if (statSync(path).isDirectory()) {
-    for (const entry of readdirSync(path, { withFileTypes: true })) {
-      const child = resolve(path, entry.name);
-      if (entry.isDirectory() || entry.isFile()) scan(child);
-    }
-    return;
-  }
-  const lines = readFileSync(path, "utf8").split("\n");
-  for (const [index, line] of lines.entries()) {
-    if (/[ \t]+$/.test(line)) {
-      failures.push(`${relative(root, path)}:${index + 1}`);
-    }
-  }
+if (result.status === 0 && result.stdout.length > 0) {
+  throw new Error(`cail-client: tracked files contain trailing whitespace:\n${result.stdout}`);
 }
 
-for (const authority of textAuthorities) {
-  scan(resolve(root, authority));
-}
-if (failures.length > 0) {
-  throw new Error(
-    `cail-client: tracked text contains trailing whitespace:\n${failures.join("\n")}`,
-  );
+if (result.status !== 0) {
+  throw new Error(`cail-client: trailing-whitespace check failed:\n${result.stderr}`);
 }

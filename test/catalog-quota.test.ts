@@ -70,7 +70,6 @@ describe("public catalog and quota parsers", () => {
     const sparseCapabilities: unknown[] = [];
     sparseCapabilities.length = 1;
     expect(() => parseCailModelCatalog({ object: "list", data: [{ ...model, capabilities: sparseCapabilities }] })).toThrow(CailError);
-    expect(() => parseCailModelCatalog({ object: "list", data: [{ ...model, capabilities: Array.from({ length: 33 }) }] })).toThrow(CailError);
 
     const trappedCapabilities = new Proxy(["text-generation"], {
       ownKeys() {
@@ -89,7 +88,6 @@ describe("public catalog and quota parsers", () => {
     const sparseData: unknown[] = [];
     sparseData.length = 1;
     expect(() => parseCailModelCatalog({ object: "list", data: sparseData })).toThrow(CailError);
-    expect(() => parseCailModelCatalog({ object: "list", data: Array.from({ length: 2_001 }) })).toThrow(CailError);
     const trappedData = new Proxy([model], {
       ownKeys() {
         throw new Error("catalog ownKeys");

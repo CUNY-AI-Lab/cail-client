@@ -3,7 +3,7 @@ export {
   extractCailError,
   parseCailError,
 } from "./errors.js";
-export { parseCailModelCatalog } from "./catalog.js";
+export { parseCailModelCatalog, parseCailQuotaSnapshot } from "./catalog.js";
 export type {
   CailCatalogModality,
   CailModelCatalog,
@@ -13,14 +13,10 @@ export type {
   CailModelStatus,
   CailModelTier,
   CailPricingState,
-} from "./catalog.js";
-export { parseCailQuotaSnapshot } from "./quota.js";
-export type {
-  CailQuota,
   CailQuotaSnapshot,
   CailQuotaState,
   CailQuotaWindowTechnique,
-} from "./quota.js";
+} from "./catalog.js";
 export {
   CAIL_GATEWAY_OPENAI_BASE_URL,
   CAIL_GATEWAY_ORIGIN,
@@ -38,8 +34,6 @@ export type {
   CailCorrelation,
   CailCredential,
   CailCredentialInput,
-  CailMetadata,
   CailQuotaOptions,
-  CailRunOptions,
   CailRunRequest,
 } from "./client.js";

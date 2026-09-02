@@ -1,4 +1,4 @@
-import type { CailQuotaSnapshot } from "./quota.js";
+import type { CailQuotaSnapshot } from "./catalog.js";
 
 export interface CailErrorEnvelopeError {
   message: string;
@@ -58,9 +58,7 @@ export function quotaExceededResponse(options: QuotaExceededEnvelopeOptions = {}
   });
 }
 
-export type CailQuotaSnapshotBody = CailQuotaSnapshot;
-
-export function quotaSnapshotBody(overrides: Partial<CailQuotaSnapshot> = {}): CailQuotaSnapshotBody {
+export function quotaSnapshotBody(overrides: Partial<CailQuotaSnapshot> = {}): CailQuotaSnapshot {
   return {
     object: "quota",
     managed_by: "cloudflare",

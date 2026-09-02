@@ -1,22 +1,24 @@
 import {
   bodyError,
   CailError,
-  extractCailError,
   parseCailError,
   readText,
 } from "./errors.js";
-import { parseCailModelCatalog } from "./catalog.js";
-import type { CailCatalogModality, CailModelCatalog } from "./catalog.js";
-import { parseCailQuotaSnapshot } from "./quota.js";
-import type { CailQuotaSnapshot } from "./quota.js";
+import { parseCailModelCatalog, parseCailQuotaSnapshot } from "./catalog.js";
+import type {
+  CailCatalogModality,
+  CailModelCatalog,
+  CailQuotaSnapshot,
+} from "./catalog.js";
 import {
+  abortReason,
   booleanFrom,
   callableFrom,
   hasControlCharacters,
+  isAbortSignal,
   numberFrom,
   plainRecordFrom,
   propertyFrom,
-  referenceFrom,
   stringFrom,
 } from "./validation.js";
 import type { RuntimeProperty } from "./validation.js";
@@ -47,9 +49,6 @@ export type CailCredential =
   | { kind: "jwt"; token: string }
   | { kind: "key"; token: string };
 
-/** A CAIL metadata object is intentionally flat and scalar. */
-export type CailMetadata = Record<string, string | number>;
-
 export interface CailClientOptions {
   baseUrl?: string;
   app: string;
@@ -59,7 +58,6 @@ export interface CailClientOptions {
 }
 
 export interface CailCallOptions {
-  metadata?: CailMetadata;
   correlation?: CailCorrelation;
   signal?: AbortSignal;
 }
@@ -77,8 +75,6 @@ export interface CailRunRequest {
   model: string;
   input: unknown;
 }
-
-export interface CailRunOptions extends CailCallOptions {}
 
 export interface CailCatalogOptions {
   modality?: CailCatalogModality;
@@ -111,7 +107,7 @@ export interface CailClient {
   run(
     request: CailRunRequest,
     credential: CailCredentialInput,
-    options?: CailRunOptions,
+    options?: CailCallOptions,
   ): Promise<Response>;
   chatCompletions(
     request: CailChatRequest,
@@ -122,12 +118,6 @@ export interface CailClient {
     credential: CailCredentialInput,
     options?: CailChatFetchOptions,
   ): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
-  call(
-    path: string,
-    init: RequestInit,
-    credential: CailCredentialInput,
-    options?: CailCallOptions,
-  ): Promise<Response>;
   getCatalog(options?: CailCatalogOptions): Promise<Response>;
   getCatalogSnapshot(options?: CailCatalogOptions): Promise<CailModelCatalog>;
   getQuota(
@@ -190,44 +180,6 @@ function headersRecord(input: HeadersInit | undefined): Headers {
       "invalid_request",
       null,
     );
-  }
-}
-
-function metadataEntries<Value>(value: Value): Array<[string, RuntimeProperty]> {
-  const fields = plainRecordFrom(value);
-  if (fields === undefined) throw invalid("X-CAIL-Metadata must be an object.", "invalid_metadata");
-  try {
-    const result: Array<[string, RuntimeProperty]> = [];
-    for (const key of fields.names()) {
-      const descriptor = fields.property(key);
-      if (!descriptor.enumerable) continue;
-      if (!descriptor.readable) throw invalid("X-CAIL-Metadata must contain data properties.", "invalid_metadata");
-      result.push([key, descriptor.value]);
-    }
-    return result;
-  } catch (error) {
-    if (error instanceof CailError) throw error;
-    throw invalid("X-CAIL-Metadata must be a readable object.", "invalid_metadata");
-  }
-}
-
-function metadataHeader<Value>(value: Value): string {
-  try {
-    for (const [key, item] of metadataEntries(value)) {
-      if (key === "__proto__" || key === "constructor" || key === "prototype" || key === "user_id" || key === "app" || key === "via") {
-        throw invalid(`X-CAIL-Metadata key "${key}" is not allowed.`, "invalid_metadata");
-      }
-      const numeric = numberFrom(item);
-      if (stringFrom(item) === undefined && (numeric === undefined || !Number.isFinite(numeric))) {
-        throw invalid(`X-CAIL-Metadata value for "${key}" must be a string or finite number.`, "invalid_metadata");
-      }
-    }
-    const serialized = JSON.stringify(Object.fromEntries(metadataEntries(value)));
-    if (serialized === undefined) throw invalid("X-CAIL-Metadata must be JSON-serializable.", "invalid_metadata");
-    return serialized;
-  } catch (error) {
-    if (error instanceof CailError) throw error;
-    throw invalid("X-CAIL-Metadata must be JSON-serializable.", "invalid_metadata");
   }
 }
 
@@ -295,29 +247,6 @@ function correlationHeaders<Value>(value: Value): CailCorrelationHeaders {
   return result;
 }
 
-type AbortSignalMembers = {
-  aborted?: RuntimeProperty;
-  addEventListener?: RuntimeProperty;
-  removeEventListener?: RuntimeProperty;
-  dispatchEvent?: RuntimeProperty;
-};
-
-function isAbortSignal<Value>(value: Value): value is Value & AbortSignal {
-  try {
-    const reference = referenceFrom(value);
-    if (reference === undefined) return false;
-    // SAFETY: referenceFrom established a non-primitive identity; each
-    // structural member is validated before it is used as an AbortSignal.
-    const candidate = reference as AbortSignalMembers;
-    return booleanFrom(candidate.aborted) !== undefined &&
-      callableFrom(candidate.addEventListener) !== undefined &&
-      callableFrom(candidate.removeEventListener) !== undefined &&
-      callableFrom(candidate.dispatchEvent) !== undefined;
-  } catch {
-    return false;
-  }
-}
-
 function optionValue<Value>(options: Value | undefined, key: string): RuntimeProperty {
   const property = propertyFrom(options, key);
   if (!property.present) return undefined;
@@ -354,17 +283,6 @@ function chatSessionId<Value>(options: Value | undefined): string | undefined {
   return value;
 }
 
-function abortReason(signal: AbortSignal): RuntimeProperty {
-  if (signal.reason !== undefined) return signal.reason;
-  try {
-    return new DOMException("The operation was aborted.", "AbortError");
-  } catch {
-    const error = new Error("The operation was aborted.");
-    error.name = "AbortError";
-    return error;
-  }
-}
-
 function networkError(): CailError {
   return new CailError(
     "network_error",
@@ -394,8 +312,6 @@ function isReadableStream<Value>(value: Value): value is Value & ReadableStream<
 
 interface BaseUrlConfig {
   baseUrl: string;
-  origin: string;
-  basePath: string;
   app: string;
   fetchImpl: typeof fetch;
   onAuthRequired?: (error: CailError) => void;
@@ -479,50 +395,14 @@ function baseUrlFrom<Value>(options: Value): BaseUrlConfig {
   const basePath = parsed.pathname.replace(/\/+$/, "");
   return {
     baseUrl: `${parsed.origin}${basePath}`,
-    origin: parsed.origin,
-    basePath,
     app,
     fetchImpl,
     onAuthRequired: typedAuthCallback,
   };
 }
 
-function resolvePath<Value>(baseUrl: string, origin: string, basePath: string, path: Value): string {
-  const pathText = stringFrom(path);
-  if (
-    pathText === undefined ||
-    pathText.length === 0 ||
-    pathText.trim() !== pathText ||
-    /\s/.test(pathText) ||
-    hasControlCharacters(pathText) ||
-    pathText.includes("\\") ||
-    pathText.includes("#") ||
-    pathText.startsWith("//") ||
-    /^[a-z][a-z0-9+.-]*:/i.test(pathText)
-  ) {
-    throw invalid("Gateway paths must be relative and contain no whitespace, fragment, or absolute URL.");
-  }
-  let target: URL;
-  try {
-    target = new URL(`${baseUrl}${pathText.startsWith("/") ? "" : "/"}${pathText}`);
-  } catch {
-    throw invalid("Gateway path is not a valid URL.");
-  }
-  if (
-    target.origin !== origin ||
-    (basePath !== "" && target.pathname !== basePath && !target.pathname.startsWith(`${basePath}/`))
-  ) {
-    throw invalid("Gateway paths must remain inside the configured base URL.");
-  }
-  return target.href;
-}
-
-function requestUrl(baseUrl: string, path: string): string {
-  return `${baseUrl}${path}`;
-}
-
 export function createCailClient(options: CailClientOptions): CailClient {
-  const { baseUrl, origin, basePath, app, fetchImpl, onAuthRequired } = baseUrlFrom(options);
+  const { baseUrl, app, fetchImpl, onAuthRequired } = baseUrlFrom(options);
 
   async function transport(
     url: string,
@@ -549,9 +429,7 @@ export function createCailClient(options: CailClientOptions): CailClient {
       throw invalid("`signal` must be an AbortSignal when present.");
     }
     const signal = signalValue === undefined ? undefined : signalValue;
-    const metadata = optionValue(callOptions, "metadata");
     const correlation = optionValue(callOptions, "correlation");
-    const existingMetadata = headers.get("x-cail-metadata");
 
     for (const name of ["authorization", "proxy-authorization", "x-cail-identity-jwt", "x-cail-app", "x-cail-metadata", "traceparent", "tracestate", "x-cail-request-id", "cookie"]) {
       headers.delete(name);
@@ -562,21 +440,6 @@ export function createCailClient(options: CailClientOptions): CailClient {
       else headers.set("authorization", `Bearer ${normalized.token}`);
       headers.set("x-cail-app", app);
 
-      if (existingMetadata !== null && existingMetadata !== undefined) {
-        let parsed: RuntimeProperty;
-        try {
-          parsed = JSON.parse(existingMetadata);
-        } catch {
-          throw invalid("Existing X-CAIL-Metadata header is not valid JSON.", "invalid_metadata");
-        }
-        if (plainRecordFrom(parsed) === undefined) throw invalid("X-CAIL-Metadata must be an object.", "invalid_metadata");
-        const mergedEntries = metadataEntries(parsed);
-        if (metadata !== undefined) mergedEntries.push(...metadataEntries(metadata));
-        const merged = Object.fromEntries(mergedEntries);
-        headers.set("x-cail-metadata", metadataHeader(merged));
-      } else if (metadata !== undefined) {
-        headers.set("x-cail-metadata", metadataHeader(metadata));
-      }
       if (correlation !== undefined) {
         for (const [name, value] of Object.entries(correlationHeaders(correlation))) headers.set(name, value);
       }
@@ -678,17 +541,6 @@ export function createCailClient(options: CailClientOptions): CailClient {
     }
   }
 
-  async function call(
-    path: string,
-    init: RequestInit,
-    credential: CailCredentialInput,
-    options?: CailCallOptions,
-  ): Promise<Response> {
-    optionsOnly(options, "call()");
-    const url = resolvePath(baseUrl, origin, basePath, path);
-    return transport(url, init, credential, options);
-  }
-
   async function getCatalog(options?: CailCatalogOptions): Promise<Response> {
     optionsOnly(options, "getCatalog()");
     const modalityValue = stringFrom(optionValue(options, "modality"));
@@ -699,7 +551,7 @@ export function createCailClient(options: CailClientOptions): CailClient {
     const modality = modalityValue;
     const signal = optionSignal(options);
     const path = modality === undefined ? "/v1/catalog" : `/v1/catalog?modality=${encodeURIComponent(modality)}`;
-    return transport(requestUrl(baseUrl, path), { method: "GET", headers: { accept: "application/json" } }, undefined, signal === undefined ? undefined : { signal }, "throw", true);
+    return transport(`${baseUrl}${path}`, { method: "GET", headers: { accept: "application/json" } }, undefined, signal === undefined ? undefined : { signal }, "throw", true);
   }
 
   async function getCatalogSnapshot(options?: CailCatalogOptions): Promise<CailModelCatalog> {
@@ -717,7 +569,7 @@ export function createCailClient(options: CailClientOptions): CailClient {
   async function getQuota(credential: CailCredentialInput, options?: CailQuotaOptions): Promise<CailQuotaSnapshot> {
     optionsOnly(options, "getQuota()");
     const signal = optionSignal(options);
-    const response = await transport(requestUrl(baseUrl, "/v1/quota"), { method: "GET", headers: { accept: "application/json" } }, credential, signal === undefined ? undefined : { signal });
+    const response = await transport(`${baseUrl}/v1/quota`, { method: "GET", headers: { accept: "application/json" } }, credential, signal === undefined ? undefined : { signal });
     try {
       return parseCailQuotaSnapshot(JSON.parse(await readText(response, signal)), response.status);
     } catch (error) {
@@ -727,7 +579,7 @@ export function createCailClient(options: CailClientOptions): CailClient {
     }
   }
 
-  async function run(request: CailRunRequest, credential: CailCredentialInput, options?: CailRunOptions): Promise<Response> {
+  async function run(request: CailRunRequest, credential: CailCredentialInput, options?: CailCallOptions): Promise<Response> {
     optionsOnly(options, "run()");
     const fields = plainRecordFrom(request);
     const model = stringFrom(fields?.read("model"));
@@ -741,7 +593,6 @@ export function createCailClient(options: CailClientOptions): CailClient {
     } catch {
       throw new CailError("invalid_request", "run() input must be JSON-serializable.", 0, {}, "invalid_request");
     }
-    if (body === undefined) throw invalid("run() input must be JSON-serializable.");
     try {
       const serialized = JSON.parse(body);
       const serializedFields = plainRecordFrom(serialized);
@@ -752,7 +603,7 @@ export function createCailClient(options: CailClientOptions): CailClient {
       if (error instanceof CailError) throw error;
       throw invalid("run() input must be JSON-serializable.");
     }
-    return transport(requestUrl(baseUrl, "/v1/run"), { method: "POST", headers: { "content-type": "application/json" }, body }, credential, options);
+    return transport(`${baseUrl}/v1/run`, { method: "POST", headers: { "content-type": "application/json" }, body }, credential, options);
   }
 
   async function chatCompletions(request: CailChatRequest, credential: CailCredentialInput, options?: CailChatOptions): Promise<Response> {
@@ -765,10 +616,9 @@ export function createCailClient(options: CailClientOptions): CailClient {
     } catch {
       throw new CailError("invalid_request", "chatCompletions() request must be JSON-serializable.", 0, {}, "invalid_request");
     }
-    if (body === undefined) throw invalid("chatCompletions() request must be JSON-serializable.");
     const headers = new Headers({ "content-type": "application/json" });
     if (sessionId !== undefined) headers.set(CAIL_SESSION_HEADER, sessionId);
-    return transport(requestUrl(baseUrl, "/v1/chat/completions"), { method: "POST", headers, body }, credential, options);
+    return transport(`${baseUrl}/v1/chat/completions`, { method: "POST", headers, body }, credential, options);
   }
 
   function chatFetch(credential: CailCredentialInput, options?: CailChatFetchOptions): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
@@ -777,7 +627,7 @@ export function createCailClient(options: CailClientOptions): CailClient {
     const modeValue = optionValue(options, "nonRetryableErrorMode");
     const mode = modeValue ?? "throw";
     if (mode !== "throw" && mode !== "return") throw invalid('`chatFetch()` nonRetryableErrorMode must be "throw" or "return".');
-    const target = new URL(requestUrl(baseUrl, "/v1/chat/completions")).href;
+    const target = new URL(`${baseUrl}/v1/chat/completions`).href;
     return async (input, init) => {
       let request: Request;
       try {
@@ -808,7 +658,5 @@ export function createCailClient(options: CailClientOptions): CailClient {
     };
   }
 
-  return { run, chatCompletions, chatFetch, call, getCatalog, getCatalogSnapshot, getQuota };
+  return { run, chatCompletions, chatFetch, getCatalog, getCatalogSnapshot, getQuota };
 }
-
-export { extractCailError };

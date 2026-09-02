@@ -18,6 +18,14 @@ The package is published to GitHub Packages:
 bun add @cuny-ai-lab/cail-client
 ```
 
+## Breaking changes in 7.0.0
+
+This major release removes the obsolete `CailClient.call()` method and its
+path resolver, the `metadata` option and generated `X-CAIL-Metadata` feature,
+the empty `CailRunOptions` alias, and the `CailQuota` and
+`CailQuotaSnapshotBody` aliases. Use the named client methods and
+`CailQuotaSnapshot` for the current API.
+
 ## Client
 
 ```ts
@@ -54,9 +62,11 @@ Key credentials send `Authorization: Bearer …`; JWT credentials send only
 `X-CAIL-Identity-JWT`. Authenticated calls include `X-CAIL-App`; CAIL
 authentication headers are authoritative, and ambient `Authorization`,
 `Proxy-Authorization`, and `Cookie` headers are stripped. The client uses
-`credentials: "omit"`, rejects redirects, and makes one fetch attempt. Other
-caller headers, including provider-specific and OpenAI extension headers, pass
-through unchanged. Successful `Response` objects are returned by reference.
+`credentials: "omit"`, rejects redirects, and makes one fetch attempt.
+Caller-supplied `X-CAIL-Metadata` is also stripped; version 7 no longer
+generates it. Other caller headers, including provider-specific and OpenAI
+extension headers, pass through unchanged. Successful `Response` objects are
+returned by reference.
 
 ## OpenAI-compatible chat
 
@@ -146,9 +156,9 @@ bun run check
 bun pm pack --dry-run --ignore-scripts
 ```
 
-`bun run check` formats tracked sources, typechecks, runs tests, builds the
-package into the ignored `dist/` directory, and checks the package contents.
-It also runs the vendored generic [anti-slop profile](tools/oxlint/anti-slop/)
+`bun run check` checks tracked files for trailing whitespace, typechecks, runs
+tests, and builds the package into the ignored `dist/` directory. It also runs
+the vendored generic [anti-slop profile](tools/oxlint/anti-slop/)
 from `tools/oxlint/anti-slop/`; its upstream commit and license are recorded
 there. Findings are fixed at their actual contract or runtime boundary. The
 publish workflow runs the same check and publishes the resulting tarball to

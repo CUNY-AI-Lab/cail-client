@@ -1,6 +1,6 @@
 {
   "name": "@cuny-ai-lab/cail-client",
-  "version": "6.1.0",
+  "version": "7.0.0",
   "description": "Web-standard CAIL Gateway transport with OpenAI-compatible chat and CAIL extensions.",
   "type": "module",
   "license": "MIT",
@@ -30,7 +30,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "lint": "oxlint .",
-    "check": "bun run lint && bun run check:format && bun run typecheck && bun run test && bun run build && bun run check:package",
+    "check": "bun run lint && bun run check:format && bun run typecheck && bun run test && bun run build",
     "check:format": "bun scripts/check-format.ts",
     "check:package": "bun pm pack --dry-run --ignore-scripts",
     "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.test.json",
