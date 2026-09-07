@@ -34,6 +34,32 @@ describe("public catalog and quota parsers", () => {
     expect(() => parseCailModelCatalog({ object: "list", data: [{ ...model, provider: "private" }] })).toThrow(CailError);
   });
 
+  it.each(["First paragraph.\nSecond paragraph.", "First line.\rSecond line.", "First line.\r\nSecond line."])(
+    "preserves Gateway description line breaks: %j",
+    (description) => {
+      const entry = { ...model, provider: "openrouter", description };
+      expect(parseCailModelCatalog({ object: "list", data: [entry] }).data).toEqual([entry]);
+    },
+  );
+
+  it.each(["\u0000", "\t", "\u000b", "\u001f", "\u007f"])(
+    "rejects other controls in a multiline description: %j",
+    (control) => {
+      const entry = { ...model, description: `First line.\nSecond${control}line.\r\n` };
+      expect(() => parseCailModelCatalog({ object: "list", data: [entry] })).toThrow(CailError);
+    },
+  );
+
+  it.each(["id", "upstream_model", "name", "task"])(
+    "keeps line breaks invalid in %s",
+    (field) => {
+      for (const lineBreak of ["\n", "\r"]) {
+        const entry = { ...model, [field]: `first${lineBreak}second` };
+        expect(() => parseCailModelCatalog({ object: "list", data: [entry] })).toThrow(CailError);
+      }
+    },
+  );
+
   it("accepts the Cloudflare estimate and rejects shape drift", () => {
     const quota = parseCailQuotaSnapshot({
       object: "quota",

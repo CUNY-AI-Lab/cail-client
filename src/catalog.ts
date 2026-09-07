@@ -87,6 +87,15 @@ function optionalTextValid(value: RuntimeProperty): OptionalTextResult {
   return item === undefined ? { valid: false } : { valid: true, text: item };
 }
 
+function optionalDescriptionValid(value: RuntimeProperty): OptionalTextResult {
+  if (value === undefined) return { valid: true };
+  const item = stringFrom(value);
+  if (item === undefined || item.length === 0 || hasControlCharacters(item.replace(/[\r\n]/g, ""))) {
+    return { valid: false };
+  }
+  return { valid: true, text: item };
+}
+
 function parseEntry<Value>(value: Value, status: number): CailModelCatalogEntry {
   const fields = plainRecordFrom(value);
   if (fields === undefined) throw bodyError(status, "catalog");
@@ -121,7 +130,7 @@ function parseEntry<Value>(value: Value, status: number): CailModelCatalogEntry 
     return capability;
   });
   const name = optionalTextValid(fields.read("name"));
-  const description = optionalTextValid(fields.read("description"));
+  const description = optionalDescriptionValid(fields.read("description"));
   const task = optionalTextValid(fields.read("task"));
 
   if (
