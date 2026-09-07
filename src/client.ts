@@ -588,7 +588,7 @@ export function createCailClient(options: CailClientOptions): CailClient {
         ...init,
         headers,
         credentials: "omit",
-        redirect: "error",
+        redirect: "manual",
       };
       if (signal !== undefined) requestInit.signal = signal;
     } catch {

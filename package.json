@@ -1,6 +1,6 @@
 {
   "name": "@cuny-ai-lab/cail-client",
-  "version": "6.1.0",
+  "version": "6.1.1",
   "description": "Web-standard CAIL Gateway transport with OpenAI-compatible chat and CAIL extensions.",
   "type": "module",
   "license": "MIT",
@@ -40,8 +40,11 @@
     "prepare": "bun run build"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "5.20260722.1",
     "@oxlint/plugins": "1.79.0",
     "@types/node": "^20.17.6",
+    "esbuild": "0.28.1",
+    "miniflare": "4.20260722.1",
     "oxlint": "1.79.0",
     "typescript": "^5.6.3",
     "vitest": "4.1.10"
