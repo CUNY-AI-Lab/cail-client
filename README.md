@@ -113,6 +113,9 @@ metadata, and calculation time).
 Version 6.2 accepts the Gateway's `bedrock-mantle` provider alongside
 `workers-ai` and `openrouter`. Update catalog consumers before enabling Mantle
 in Gateway; earlier clients reject a catalog containing that provider.
+Version 6.2.1 preserves CR/LF line breaks in catalog descriptions, matching the
+Gateway's public metadata. Other control characters remain invalid, and model
+identifiers and other text fields still reject line breaks.
 
 ```ts
 const catalog = await cail.getCatalogSnapshot({ modality: "all" });
