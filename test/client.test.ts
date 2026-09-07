@@ -107,7 +107,7 @@ describe("CAIL Gateway transport", () => {
     await recorded.client.run({ model: "@cf/example/model", input: { prompt: "hello" } }, "trusted-token");
     expect(recorded.calls).toHaveLength(1);
     expect(recorded.calls[0]?.url).toBe(`${BASE}/v1/run`);
-    expect(recorded.calls[0]?.init).toMatchObject({ method: "POST", redirect: "error", credentials: "omit" });
+    expect(recorded.calls[0]?.init).toMatchObject({ method: "POST", redirect: "manual", credentials: "omit" });
     const headers = new Headers(recorded.calls[0]?.init.headers);
     expect(headers.get("authorization")).toBe("Bearer trusted-token");
     expect(headers.get("x-cail-app")).toBe("test-app");
@@ -116,6 +116,21 @@ describe("CAIL Gateway transport", () => {
       model: "@cf/example/model",
       input: { prompt: "hello" },
     });
+  });
+
+  it("rejects and cancels redirect responses without another attempt", async () => {
+    for (const opaque of [false, true]) {
+      const pending = delayedBodyResponse(302);
+      if (opaque) {
+        Object.defineProperty(pending.response, "type", { value: "opaqueredirect" });
+        Object.defineProperty(pending.response, "status", { value: 0 });
+      }
+      const recorded = client(pending.response);
+      await expect(recorded.client.run({ model: "test", input: {} }, "key-token"))
+        .rejects.toMatchObject({ code: "unexpected_redirect" });
+      expect(pending.wasCancelled()).toBe(true);
+      expect(recorded.calls).toHaveLength(1);
+    }
   });
 
   it("uses the identity header for JWT credentials and strips caller auth", async () => {
