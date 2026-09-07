@@ -24,7 +24,12 @@ const model = {
 
 describe("public catalog and quota parsers", () => {
   it("accepts enriched catalog entries and rejects duplicates or pollution", () => {
-    expect(parseCailModelCatalog({ object: "list", data: [model] }).data[0]).toMatchObject(model);
+    const entries = [
+      model,
+      { ...model, id: "example/chat", upstream_model: "example/chat", provider: "openrouter" },
+      { ...model, id: "openai.gpt-oss-20b", upstream_model: "openai.gpt-oss-20b", provider: "bedrock-mantle" },
+    ];
+    expect(parseCailModelCatalog({ object: "list", data: entries }).data).toEqual(entries);
     expect(() => parseCailModelCatalog({ object: "list", data: [model, model] })).toThrow(CailError);
     expect(() => parseCailModelCatalog({ object: "list", data: [{ ...model, provider: "private" }] })).toThrow(CailError);
   });
