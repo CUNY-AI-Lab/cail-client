@@ -110,6 +110,10 @@ catalog. `getQuota()` sends authenticated `GET /v1/quota` and validates the
 Cloudflare-managed estimate (`microdollar` values, percentages, window
 metadata, and calculation time).
 
+Version 6.2 accepts the Gateway's `bedrock-mantle` provider alongside
+`workers-ai` and `openrouter`. Update catalog consumers before enabling Mantle
+in Gateway; earlier clients reject a catalog containing that provider.
+
 ```ts
 const catalog = await cail.getCatalogSnapshot({ modality: "all" });
 const quota = await cail.getQuota(apiKey);
