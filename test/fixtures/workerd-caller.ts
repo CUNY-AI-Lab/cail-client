@@ -13,6 +13,12 @@ export default {
       fetchImpl: (input, init) => env.GATEWAY.fetch(input, init),
     });
     try {
+      if (url.pathname === "/multipart") {
+        const body = new FormData();
+        body.set("model", "test-transcription");
+        body.set("file", new Blob(["synthetic audio bytes"], { type: "audio/wav" }), "sample.wav");
+        return await client.call("/v1/audio/transcriptions", { method: "POST", body }, "test-key");
+      }
       if (url.pathname === "/run") {
         return await client.run({ model: "test", input: { prompt: "hello" } }, "test-key");
       }

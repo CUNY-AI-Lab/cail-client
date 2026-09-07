@@ -77,4 +77,15 @@ describe("workerd service binding transport", () => {
     const destination = await runtime.getWorker("destination");
     expect(await (await destination.fetch("https://destination.test/calls")).json()).toBe(0);
   });
+
+  it("preserves a multipart upload through call() and the service binding", async () => {
+    const response = await runtime.dispatchFetch("https://caller.test/multipart");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      authorization: "Bearer test-key",
+      app: "workerd-test",
+      model: "test-transcription",
+      file: { name: "sample.wav", type: "audio/wav", text: "synthetic audio bytes" },
+    });
+  });
 });

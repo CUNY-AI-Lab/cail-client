@@ -10,13 +10,14 @@ import type { CailCatalogModality, CailModelCatalog } from "./catalog.js";
 import { parseCailQuotaSnapshot } from "./quota.js";
 import type { CailQuotaSnapshot } from "./quota.js";
 import {
+  abortReason,
   booleanFrom,
   callableFrom,
   hasControlCharacters,
+  isAbortSignal,
   numberFrom,
   plainRecordFrom,
   propertyFrom,
-  referenceFrom,
   stringFrom,
 } from "./validation.js";
 import type { RuntimeProperty } from "./validation.js";
@@ -295,29 +296,6 @@ function correlationHeaders<Value>(value: Value): CailCorrelationHeaders {
   return result;
 }
 
-type AbortSignalMembers = {
-  aborted?: RuntimeProperty;
-  addEventListener?: RuntimeProperty;
-  removeEventListener?: RuntimeProperty;
-  dispatchEvent?: RuntimeProperty;
-};
-
-function isAbortSignal<Value>(value: Value): value is Value & AbortSignal {
-  try {
-    const reference = referenceFrom(value);
-    if (reference === undefined) return false;
-    // SAFETY: referenceFrom established a non-primitive identity; each
-    // structural member is validated before it is used as an AbortSignal.
-    const candidate = reference as AbortSignalMembers;
-    return booleanFrom(candidate.aborted) !== undefined &&
-      callableFrom(candidate.addEventListener) !== undefined &&
-      callableFrom(candidate.removeEventListener) !== undefined &&
-      callableFrom(candidate.dispatchEvent) !== undefined;
-  } catch {
-    return false;
-  }
-}
-
 function optionValue<Value>(options: Value | undefined, key: string): RuntimeProperty {
   const property = propertyFrom(options, key);
   if (!property.present) return undefined;
@@ -352,17 +330,6 @@ function chatSessionId<Value>(options: Value | undefined): string | undefined {
     );
   }
   return value;
-}
-
-function abortReason(signal: AbortSignal): RuntimeProperty {
-  if (signal.reason !== undefined) return signal.reason;
-  try {
-    return new DOMException("The operation was aborted.", "AbortError");
-  } catch {
-    const error = new Error("The operation was aborted.");
-    error.name = "AbortError";
-    return error;
-  }
 }
 
 function networkError(): CailError {
