@@ -1,8 +1,9 @@
 import {
+  abortReason,
   arrayItemsFrom,
   booleanFrom,
-  callableFrom,
   hasControlCharacters,
+  isAbortSignal,
   numberFrom,
   plainRecordFrom,
   propertyFrom,
@@ -132,44 +133,8 @@ export function bodyError(status: number, kind: "catalog" | "quota"): CailError 
   );
 }
 
-function abortReason(signal: AbortSignal): RuntimeProperty {
-  if (signal.reason !== undefined) return signal.reason;
-  try {
-    return new DOMException("The operation was aborted.", "AbortError");
-  } catch {
-    const error = new Error("The operation was aborted.");
-    error.name = "AbortError";
-    return error;
-  }
-}
-
-type AbortSignalMembers = {
-  aborted?: RuntimeProperty;
-  addEventListener?: RuntimeProperty;
-  removeEventListener?: RuntimeProperty;
-  dispatchEvent?: RuntimeProperty;
-};
-
 function isAbortError<Value>(value: Value): boolean {
   return stringFrom(plainRecordFrom(value)?.read("name")) === "AbortError";
-}
-
-function isAbortSignal<Value>(value: Value): value is Value & AbortSignal {
-  try {
-    const reference = referenceFrom(value);
-    if (reference === undefined) return false;
-    // SAFETY: referenceFrom established a non-primitive identity; each
-    // structural member is validated before it is used as an AbortSignal.
-    const candidate = reference as AbortSignalMembers;
-    return (
-      booleanFrom(candidate.aborted) !== undefined &&
-      callableFrom(candidate.addEventListener) !== undefined &&
-      callableFrom(candidate.removeEventListener) !== undefined &&
-      callableFrom(candidate.dispatchEvent) !== undefined
-    );
-  } catch {
-    return false;
-  }
 }
 
 /** Read a response body while preserving a caller-provided abort reason. */

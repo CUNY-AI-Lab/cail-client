@@ -5,7 +5,7 @@ import {
   CailError,
   createCailClient,
 } from "../src/index.js";
-import type { CailClientOptions, CailCorrelation, CailMetadata } from "../src/index.js";
+import type { CailChatRequest, CailClientOptions, CailCorrelation, CailMetadata } from "../src/index.js";
 import { cailErrorResponse, quotaSnapshotResponse } from "../src/testing.js";
 
 const BASE = "https://gateway.example/api";
@@ -68,6 +68,15 @@ function delayedBodyResponse(status: number): DelayedBodyResponse {
 }
 
 describe("CAIL Gateway transport", () => {
+  it("rejects a chat request that serializes to nothing", async () => {
+    const recorded = client(new Response("ok", { status: 200 }));
+    const request: CailChatRequest = { model: "test", messages: [] };
+    Object.assign(request, { toJSON: () => undefined });
+    await expect(recorded.client.chatCompletions(request, "key-token"))
+      .rejects.toMatchObject({ code: "invalid_request", status: 0 });
+    expect(recorded.calls).toHaveLength(0);
+  });
+
   it("defaults to the canonical origin and joins /v1 endpoints once", async () => {
     expect(CAIL_GATEWAY_ORIGIN).toBe("https://tools.ailab.gc.cuny.edu");
     expect(CAIL_GATEWAY_OPENAI_BASE_URL).toBe(`${CAIL_GATEWAY_ORIGIN}/v1`);

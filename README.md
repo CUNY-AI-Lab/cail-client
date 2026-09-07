@@ -103,6 +103,12 @@ for an SDK that understands `X-Should-Retry: false`.
 
 ## CAIL extensions
 
+`call(path, init, credential, options)` sends a request to a relative path
+within the configured Gateway base URL. Use it for Gateway endpoints that need
+a body such as `FormData`; the client preserves that body and applies the same
+credential, redirect, and cancellation handling as the named methods. Let fetch
+set the multipart content type and boundary when sending `FormData`.
+
 `run()` sends `{ model, input }` to `POST /v1/run` and returns the raw response.
 `getCatalog()` sends credential-free `GET /v1/catalog`; its optional modality
 is `text`, `image`, or `all`. `getCatalogSnapshot()` validates the enriched
