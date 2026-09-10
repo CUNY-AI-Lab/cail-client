@@ -27,6 +27,11 @@ jobs:
       - name: Install frozen dependencies
         run: bun install --frozen-lockfile --ignore-scripts
 
+      - name: Set up declared Node baseline
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+
       - name: Verify package-local release gate
         run: bun run check
 
