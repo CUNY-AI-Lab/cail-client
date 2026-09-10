@@ -156,16 +156,18 @@ Use Bun:
 ```sh
 bun install --frozen-lockfile --ignore-scripts
 bun run check
-bun pm pack --dry-run --ignore-scripts
 ```
 
 `bun run check` formats tracked sources, typechecks, runs tests, builds the
-package into the ignored `dist/` directory, and checks the package contents.
+package into the ignored `dist/` directory, and packs `.release/package.tgz`.
+It installs that tarball into a temporary consumer with lifecycle scripts disabled
+and exercises the public client and testing exports against a local HTTP server
+using Node (Node 20 in CI).
 It also runs the vendored generic [anti-slop profile](tools/oxlint/anti-slop/)
 from `tools/oxlint/anti-slop/`; its upstream commit and license are recorded
 there. Findings are fixed at their actual contract or runtime boundary. The
-publish workflow runs the same check and publishes the resulting tarball to
-GitHub Packages.
+publish workflow runs the same check and publishes that tested tarball to GitHub
+Packages.
 
 ## License
 
