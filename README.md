@@ -7,12 +7,8 @@ errors. It does not implement provider schemas or retry requests.
 
 ## Install
 
-The package is published to GitHub Packages:
-
-```ini
-@cuny-ai-lab:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
-```
+The package is published to the public npm registry; no registry mapping or
+token is needed:
 
 ```sh
 bun add @cuny-ai-lab/cail-client
@@ -166,8 +162,10 @@ using Node (Node 20 in CI).
 It also runs the vendored generic [anti-slop profile](tools/oxlint/anti-slop/)
 from `tools/oxlint/anti-slop/`; its upstream commit and license are recorded
 there. Findings are fixed at their actual contract or runtime boundary. The
-publish workflow runs the same check and publishes that tested tarball to GitHub
-Packages.
+publish workflow runs the same check and publishes that tested tarball to npm
+through trusted publishing: npm accepts the workflow's short-lived GitHub
+identity, so no npm token exists, and each release carries a provenance
+attestation.
 
 ## License
 
