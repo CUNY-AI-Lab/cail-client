@@ -5,7 +5,6 @@ const root = resolve(import.meta.dir, "..");
 const textAuthorities = [
   ".github",
   ".gitignore",
-  ".npmrc",
   "LICENSE",
   "README.md",
   "bun.lock",
