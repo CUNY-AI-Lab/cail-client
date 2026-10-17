@@ -22,23 +22,58 @@ const model = {
   task: "text",
 };
 
-describe("public catalog and quota parsers", () => {
-  it("accepts enriched catalog entries and rejects duplicates or pollution", () => {
+const validQuota = {
+  object: "quota",
+  managed_by: "cloudflare",
+  state: "estimated",
+  unit: "microdollar",
+  currency: "USD",
+  limit: 1_000,
+  estimated_used: 200,
+  estimated_remaining: 800,
+  used_percent: 20,
+  remaining_percent: 80,
+  window_technique: "fixed",
+  window_seconds: 60,
+  calculated_at: 1_720_600_000,
+};
+
+function catalogOf<Data>(data: Data) {
+  return { object: "list", data };
+}
+
+describe("public catalog parser", () => {
+  it("accepts enriched catalog entries from every provider", () => {
     const entries = [
       model,
       { ...model, id: "example/chat", upstream_model: "example/chat", provider: "openrouter" },
       { ...model, id: "openai.gpt-oss-20b", upstream_model: "openai.gpt-oss-20b", provider: "bedrock-mantle" },
     ];
-    expect(parseCailModelCatalog({ object: "list", data: entries }).data).toEqual(entries);
-    expect(() => parseCailModelCatalog({ object: "list", data: [model, model] })).toThrow(CailError);
-    expect(() => parseCailModelCatalog({ object: "list", data: [{ ...model, provider: "private" }] })).toThrow(CailError);
+    expect(parseCailModelCatalog(catalogOf(entries)).data).toEqual(entries);
+  });
+
+  it("rejects duplicate model ids", () => {
+    expect(() => parseCailModelCatalog(catalogOf([model, model]))).toThrow(CailError);
+  });
+
+  it("rejects an unknown provider", () => {
+    expect(() => parseCailModelCatalog(catalogOf([{ ...model, provider: "private" }]))).toThrow(CailError);
+  });
+
+  it("drops entry keys outside the catalog contract, including __proto__", () => {
+    const polluted = JSON.parse(
+      JSON.stringify({ ...model, private_note: "internal" }).replace("{", '{"__proto__":{"polluted":true},'),
+    );
+    const [entry] = parseCailModelCatalog(catalogOf([polluted])).data;
+    expect(entry).toEqual(model);
+    expect(Object.getPrototypeOf(entry)).toBe(Object.prototype);
   });
 
   it.each(["First paragraph.\nSecond paragraph.", "First line.\rSecond line.", "First line.\r\nSecond line."])(
     "preserves Gateway description line breaks: %j",
     (description) => {
       const entry = { ...model, provider: "openrouter", description };
-      expect(parseCailModelCatalog({ object: "list", data: [entry] }).data).toEqual([entry]);
+      expect(parseCailModelCatalog(catalogOf([entry])).data).toEqual([entry]);
     },
   );
 
@@ -46,47 +81,23 @@ describe("public catalog and quota parsers", () => {
     "rejects other controls in a multiline description: %j",
     (control) => {
       const entry = { ...model, description: `First line.\nSecond${control}line.\r\n` };
-      expect(() => parseCailModelCatalog({ object: "list", data: [entry] })).toThrow(CailError);
+      expect(() => parseCailModelCatalog(catalogOf([entry]))).toThrow(CailError);
     },
   );
 
-  it.each(["id", "upstream_model", "name", "task"])(
-    "keeps line breaks invalid in %s",
-    (field) => {
-      for (const lineBreak of ["\n", "\r"]) {
-        const entry = { ...model, [field]: `first${lineBreak}second` };
-        expect(() => parseCailModelCatalog({ object: "list", data: [entry] })).toThrow(CailError);
-      }
-    },
-  );
-
-  it("accepts the Cloudflare estimate and rejects shape drift", () => {
-    const quota = parseCailQuotaSnapshot({
-      object: "quota",
-      managed_by: "cloudflare",
-      state: "estimated",
-      unit: "microdollar",
-      currency: "USD",
-      limit: 1_000,
-      estimated_used: 200,
-      estimated_remaining: 800,
-      used_percent: 20,
-      remaining_percent: 80,
-      window_technique: "fixed",
-      window_seconds: 60,
-      calculated_at: 1_720_600_000,
-    });
-    expect(quota).toMatchObject({ object: "quota", estimated_remaining: 800 });
-    expect(() => parseCailQuotaSnapshot({ ...quota, estimated_remaining: 1 })).toThrow(CailError);
-    expect(() => parseCailQuotaSnapshot({ ...quota, remaining_percent: 1 })).toThrow(CailError);
-    expect(() => parseCailQuotaSnapshot({ ...quota, used_percent: 19, remaining_percent: 81 })).toThrow(CailError);
-    expect(() => parseCailQuotaSnapshot({ ...quota, used: 200 })).toThrow(CailError);
-    expect(() => parseCailQuotaSnapshot({ ...quota, subject: "app-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" })).toThrow(CailError);
+  it.each([
+    ["id", "\n"], ["id", "\r"],
+    ["upstream_model", "\n"], ["upstream_model", "\r"],
+    ["name", "\n"], ["name", "\r"],
+    ["task", "\n"], ["task", "\r"],
+  ])("keeps line breaks invalid in %s: %j", (field, lineBreak) => {
+    const entry = { ...model, [field]: `first${lineBreak}second` };
+    expect(() => parseCailModelCatalog(catalogOf([entry]))).toThrow(CailError);
   });
 
-  it("rejects sparse, accessor, and trapped catalog arrays without reading getters", () => {
+  it("rejects an accessor capability without reading it", () => {
     let getterCalled = false;
-    const accessorCapabilities: unknown[] = [];
+    const accessorCapabilities: string[] = [];
     Object.defineProperty(accessorCapabilities, "0", {
       enumerable: true,
       get() {
@@ -95,63 +106,89 @@ describe("public catalog and quota parsers", () => {
       },
     });
     accessorCapabilities.length = 1;
-    expect(() => parseCailModelCatalog({ object: "list", data: [{ ...model, capabilities: accessorCapabilities }] })).toThrow(CailError);
+    expect(() => parseCailModelCatalog(catalogOf([{ ...model, capabilities: accessorCapabilities }]))).toThrow(CailError);
     expect(getterCalled).toBe(false);
+  });
 
-    const sparseCapabilities: unknown[] = [];
-    sparseCapabilities.length = 1;
-    expect(() => parseCailModelCatalog({ object: "list", data: [{ ...model, capabilities: sparseCapabilities }] })).toThrow(CailError);
-    expect(() => parseCailModelCatalog({ object: "list", data: [{ ...model, capabilities: Array.from({ length: 33 }) }] })).toThrow(CailError);
-
-    const trappedCapabilities = new Proxy(["text-generation"], {
-      ownKeys() {
-        throw new Error("capability ownKeys");
+  it.each([
+    {
+      label: "sparse capabilities",
+      catalog: () => {
+        const capabilities: string[] = [];
+        capabilities.length = 1;
+        return catalogOf([{ ...model, capabilities }]);
       },
-    });
-    expect(() => parseCailModelCatalog({ object: "list", data: [{ ...model, capabilities: trappedCapabilities }] })).toThrow(CailError);
-    const getTrappedCapabilities = new Proxy(["text-generation"], {
+    },
+    { label: "33 capabilities", catalog: () => catalogOf([{ ...model, capabilities: Array.from({ length: 33 }) }]) },
+    {
+      label: "capabilities whose keys cannot be listed",
+      catalog: () => catalogOf([{
+        ...model,
+        capabilities: new Proxy(["text-generation"], {
+          ownKeys() {
+            throw new Error("capability ownKeys");
+          },
+        }),
+      }]),
+    },
+    {
+      label: "sparse data",
+      catalog: () => {
+        const data: object[] = [];
+        data.length = 1;
+        return catalogOf(data);
+      },
+    },
+    { label: "2,001 entries", catalog: () => catalogOf(Array.from({ length: 2_001 })) },
+    {
+      label: "data whose keys cannot be listed",
+      catalog: () => catalogOf(new Proxy([model], {
+        ownKeys() {
+          throw new Error("catalog ownKeys");
+        },
+      })),
+    },
+  ])("rejects a catalog with $label", ({ catalog }) => {
+    expect(() => parseCailModelCatalog(catalog())).toThrow(CailError);
+  });
+
+  it("reads capabilities through descriptors when the array traps get", () => {
+    const capabilities = new Proxy(["text-generation"], {
       get() {
         throw new Error("capability get");
       },
     });
-    expect(parseCailModelCatalog({ object: "list", data: [{ ...model, capabilities: getTrappedCapabilities }] }).data[0]?.capabilities)
+    expect(parseCailModelCatalog(catalogOf([{ ...model, capabilities }])).data[0]?.capabilities)
       .toEqual(["text-generation"]);
+  });
 
-    const sparseData: unknown[] = [];
-    sparseData.length = 1;
-    expect(() => parseCailModelCatalog({ object: "list", data: sparseData })).toThrow(CailError);
-    expect(() => parseCailModelCatalog({ object: "list", data: Array.from({ length: 2_001 }) })).toThrow(CailError);
-    const trappedData = new Proxy([model], {
-      ownKeys() {
-        throw new Error("catalog ownKeys");
-      },
-    });
-    expect(() => parseCailModelCatalog({ object: "list", data: trappedData })).toThrow(CailError);
-    const getTrappedData = new Proxy([model], {
+  it("reads data through descriptors when the array traps get", () => {
+    const data = new Proxy([model], {
       get() {
         throw new Error("catalog get");
       },
     });
-    expect(parseCailModelCatalog({ object: "list", data: getTrappedData }).data).toHaveLength(1);
+    expect(parseCailModelCatalog(catalogOf(data)).data).toHaveLength(1);
+  });
+});
+
+describe("quota parser", () => {
+  it("accepts the Cloudflare estimate", () => {
+    expect(parseCailQuotaSnapshot(validQuota)).toMatchObject({ object: "quota", estimated_remaining: 800 });
   });
 
-  it("reads quota fields through own data descriptors only", () => {
+  it.each([
+    ["a remaining estimate that does not match the limit", { estimated_remaining: 1 }],
+    ["a remaining percent that does not match the estimate", { remaining_percent: 1 }],
+    ["percents that do not match the estimate", { used_percent: 19, remaining_percent: 81 }],
+    ["an undeclared used field", { used: 200 }],
+    ["a subject field", { subject: "app-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }],
+  ])("rejects %s", (_label, drift) => {
+    expect(() => parseCailQuotaSnapshot({ ...validQuota, ...drift })).toThrow(CailError);
+  });
+
+  it("rejects an accessor quota field without reading it", () => {
     let getterCalled = false;
-    const validQuota = {
-      object: "quota",
-      managed_by: "cloudflare",
-      state: "estimated",
-      unit: "microdollar",
-      currency: "USD",
-      limit: 1_000,
-      estimated_used: 200,
-      estimated_remaining: 800,
-      used_percent: 20,
-      remaining_percent: 80,
-      window_technique: "fixed",
-      window_seconds: 60,
-      calculated_at: 1_720_600_000,
-    };
     const hostile = { ...validQuota };
     Object.defineProperty(hostile, "estimated_remaining", {
       enumerable: true,
@@ -162,14 +199,18 @@ describe("public catalog and quota parsers", () => {
     });
     expect(() => parseCailQuotaSnapshot(hostile)).toThrow(CailError);
     expect(getterCalled).toBe(false);
+  });
 
+  it("reads quota fields through descriptors when the object traps get", () => {
     const trapped = new Proxy({ ...validQuota }, {
       get() {
         throw new Error("quota get trap");
       },
     });
     expect(parseCailQuotaSnapshot(trapped)).toMatchObject({ estimated_remaining: 800 });
+  });
 
+  it("contains a descriptor trap without echoing it", () => {
     const descriptorTrapped = new Proxy({ ...validQuota }, {
       getOwnPropertyDescriptor() {
         throw new Error("PRIVATE_QUOTA_DESCRIPTOR");

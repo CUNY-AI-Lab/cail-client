@@ -54,15 +54,17 @@ describe("workerd service binding transport", () => {
     await runtime?.dispose();
   });
 
-  it.each(["/chat", "/run", "/chat-fetch"])("sends authenticated %s requests to the receiver", async (path) => {
+  it.each([
+    ["/chat", { model: "test", messages: [] }],
+    ["/run", { model: "test", input: { prompt: "hello" } }],
+    ["/chat-fetch", { model: "test", messages: [] }],
+  ])("sends authenticated %s requests to the receiver", async (path, body) => {
     const response = await runtime.dispatchFetch(`https://caller.test${path}`);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       authorization: "Bearer test-key",
       app: "workerd-test",
-      body: path === "/run"
-        ? { model: "test", input: { prompt: "hello" } }
-        : { model: "test", messages: [] },
+      body,
     });
   });
 
