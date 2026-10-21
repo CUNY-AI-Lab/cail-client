@@ -160,7 +160,7 @@ bun run check
 package into the ignored `dist/` directory, and packs `.release/package.tgz`.
 It installs that tarball into a temporary consumer with lifecycle scripts disabled
 and exercises the public client and testing exports against a local HTTP server
-using Node (Node 20 in CI).
+using Node (Node 22 in CI).
 It also runs the vendored generic [anti-slop profile](tools/oxlint/anti-slop/)
 from `tools/oxlint/anti-slop/`; its upstream commit and license are recorded
 there. Findings are fixed at their actual contract or runtime boundary. The
