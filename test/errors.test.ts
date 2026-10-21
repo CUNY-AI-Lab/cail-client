@@ -66,6 +66,31 @@ describe("parseCailError", () => {
     expect(JSON.stringify(error)).not.toContain("PRIVATE_NESTED_BODY");
   });
 
+  it("stops reading an error body past 64 KiB and reports an unexpected response", async () => {
+    const chunk = new TextEncoder().encode(" ".repeat(16 * 1024));
+    let pulledBytes = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulledBytes >= 4 * 1024 * 1024) {
+          controller.close();
+          return;
+        }
+        pulledBytes += chunk.byteLength;
+        controller.enqueue(chunk);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    const error = await parseCailError(new Response(body, { status: 502 }));
+
+    expect(error).toMatchObject({ code: "unknown_error", status: 502 });
+    expect(cancelled).toBe(true);
+    expect(pulledBytes).toBeLessThanOrEqual(64 * 1024 + 2 * chunk.byteLength);
+  });
+
   it("cancels an in-flight response body with the caller's abort reason", async () => {
     const controller = new AbortController();
     const reason = new Error("caller cancelled");

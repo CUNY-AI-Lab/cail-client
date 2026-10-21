@@ -137,8 +137,30 @@ function isAbortError<Value>(value: Value): boolean {
   return stringFrom(plainRecordFrom(value)?.read("name")) === "AbortError";
 }
 
-/** Read a response body while preserving a caller-provided abort reason. */
-export async function readText(response: Response, signal?: AbortSignal): Promise<string> {
+/**
+ * The most bytes of an error body the client reads. Gateway error envelopes
+ * are well under a kilobyte; the Gateway bounds its own diagnostic reads the
+ * same way.
+ */
+const ERROR_BODY_MAX_BYTES = 64 * 1024;
+
+/** A body that passed its byte limit; the reader has been cancelled. */
+class BodyTooLarge extends Error {
+  constructor() {
+    super("response body exceeds its read limit");
+    this.name = "BodyTooLarge";
+  }
+}
+
+/**
+ * Read a response body while preserving a caller-provided abort reason.
+ * With `maxBytes`, stop and cancel the body once it passes that many bytes.
+ */
+export async function readText(
+  response: Response,
+  signal?: AbortSignal,
+  maxBytes?: number,
+): Promise<string> {
   if (signal !== undefined && !isAbortSignal(signal)) {
     throw new CailError("invalid_request", "`signal` must be an AbortSignal when present.", 0);
   }
@@ -209,11 +231,21 @@ export async function readText(response: Response, signal?: AbortSignal): Promis
   try {
     const decoder = new TextDecoder();
     let text = "";
+    let received = 0;
     while (true) {
       if (signal?.aborted) throw abortReason(signal);
       const result = await readChunk();
       if (signal?.aborted) throw abortReason(signal);
       if (result.done) break;
+      received += result.value.byteLength;
+      if (maxBytes !== undefined && received > maxBytes) {
+        try {
+          void reader.cancel().catch(() => {});
+        } catch {
+          // The body is abandoned either way.
+        }
+        throw new BodyTooLarge();
+      }
       text += decoder.decode(result.value, { stream: true });
     }
     text += decoder.decode();
@@ -255,14 +287,18 @@ function envelopeError<Value>(value: Value, status: number): CailError | null {
   return new CailError(code, message, status, extras, type, param);
 }
 
-/** Parse a non-success Gateway response without copying its raw body. */
+/**
+ * Parse a non-success Gateway response without copying its raw body. A body
+ * over 64 KiB is cancelled unread past that point and reported as an
+ * unexpected response.
+ */
 export async function parseCailError(
   response: Response,
   signal?: AbortSignal,
 ): Promise<CailError> {
   let parsed: RuntimeProperty | undefined;
   try {
-    const text = await readText(response, signal);
+    const text = await readText(response, signal, ERROR_BODY_MAX_BYTES);
     try {
       parsed = JSON.parse(text);
     } catch {
