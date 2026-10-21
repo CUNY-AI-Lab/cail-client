@@ -30,7 +30,7 @@ jobs:
       - name: Set up declared Node baseline
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20
+          node-version: 22
       - name: Require a version-matching tag
         shell: bash
         run: |
@@ -41,7 +41,7 @@ jobs:
       - name: Verify and pack the release
         run: bun run prepublishOnly
       # npm trusted publishing needs Node 22.14+ and npm 11.5.1+; the checks
-      # above ran on the declared Node 20 baseline.
+      # above ran on the declared Node 22 baseline.
       - name: Set up Node for trusted publishing
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
