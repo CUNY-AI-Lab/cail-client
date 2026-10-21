@@ -131,7 +131,9 @@ Non-success Gateway responses become `CailError` values with `code`, `type`,
 and other scalar CAIL fields remain available through the same scalar value
 contract. A valid CAIL envelope keeps its message. Malformed or non-JSON
 bodies produce a generic safe message; raw bodies, tokens, and transport
-causes are not copied into the message or JSON representation.
+causes are not copied into the message or JSON representation. Since 6.2.3 the
+client reads at most 64 KiB of an error body; a longer body is cancelled and
+reported as `unknown_error` with the response status.
 
 ```ts
 import { CailError, extractCailError } from "@cuny-ai-lab/cail-client";
