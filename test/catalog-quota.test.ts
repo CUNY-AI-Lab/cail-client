@@ -48,6 +48,7 @@ describe("public catalog parser", () => {
       model,
       { ...model, id: "example/chat", upstream_model: "example/chat", provider: "openrouter" },
       { ...model, id: "openai.gpt-oss-20b", upstream_model: "openai.gpt-oss-20b", provider: "bedrock-mantle" },
+      { ...model, id: "kimi-k3", upstream_model: "kimi-k3", provider: "bedrock-runtime" },
     ];
     expect(parseCailModelCatalog(catalogOf(entries)).data).toEqual(entries);
   });

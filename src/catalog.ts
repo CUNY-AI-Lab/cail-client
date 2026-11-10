@@ -12,7 +12,11 @@ import type { RuntimeProperty } from "./validation.js";
 export type CailModelTier = "recommended" | "advanced";
 export type CailModelStatus = "active" | "deprecated" | "retiring";
 export type CailModelModality = "text" | "image";
-export type CailModelProvider = "workers-ai" | "openrouter" | "bedrock-mantle";
+export type CailModelProvider =
+  | "workers-ai"
+  | "openrouter"
+  | "bedrock-mantle"
+  | "bedrock-runtime";
 export type CailPricingState = "catalog" | "verified-live";
 
 export interface CailModelCatalogEntry {
@@ -69,7 +73,10 @@ function modalityFrom<Value>(value: Value): CailModelModality | undefined {
 
 function providerFrom<Value>(value: Value): CailModelProvider | undefined {
   const item = stringFrom(value);
-  return item === "workers-ai" || item === "openrouter" || item === "bedrock-mantle"
+  return item === "workers-ai" ||
+    item === "openrouter" ||
+    item === "bedrock-mantle" ||
+    item === "bedrock-runtime"
     ? item
     : undefined;
 }
